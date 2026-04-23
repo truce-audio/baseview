@@ -73,6 +73,13 @@ impl WindowInner {
         if self.open.get() {
             self.open.set(false);
             unsafe {
+                // Local autorelease pool so any ObjC objects autoreleased
+                // by the teardown below drain here instead of escaping
+                // into an outer host pool — critical for AAX / Pro Tools
+                // where `-[DFW_NSApplication sendEvent:]` wraps the
+                // plugin-close callback in its own pool.
+                let pool = NSAutoreleasePool::new(nil);
+
                 // Take back ownership of the NSView's Rc<WindowState>
                 let state_ptr: *const c_void = *(*self.ns_view).get_ivar(BASEVIEW_STATE_IVAR);
                 let window_state = Rc::from_raw(state_ptr as *mut WindowState);
@@ -94,6 +101,32 @@ impl WindowInner {
                     ns_window.close();
                 }
 
+                // Strip residual ties to the host window before detaching
+                // and releasing. Any of these left behind leaves a
+                // dangling back-reference somewhere in AppKit (responder
+                // chain, tracking-area registry, layer contents queue)
+                // that can blow up inside the host's later autorelease-
+                // pool drain. Seen in Pro Tools as a crash inside
+                // `-[DFW_NSContainer dealloc]` at a tiny address, where
+                // the container messages its stale reference to our
+                // view.
+                let window: id = msg_send![self.ns_view, window];
+                if window != nil {
+                    let () = msg_send![window, makeFirstResponder: nil];
+                }
+                let tracking_areas: id = msg_send![self.ns_view, trackingAreas];
+                if tracking_areas != nil {
+                    let count: usize = msg_send![tracking_areas, count];
+                    for i in (0..count).rev() {
+                        let area: id = msg_send![tracking_areas, objectAtIndex: i];
+                        let () = msg_send![self.ns_view, removeTrackingArea: area];
+                    }
+                }
+                let layer: id = msg_send![self.ns_view, layer];
+                if layer != nil {
+                    let () = msg_send![layer, setContents: nil];
+                }
+
                 // Ensure that the NSView is detached from the parent window
                 self.ns_view.removeFromSuperview();
                 let () = msg_send![self.ns_view as id, release];
@@ -103,6 +136,8 @@ impl WindowInner {
                 if let Some(app) = app {
                     app.stop_(app);
                 }
+
+                let _: () = msg_send![pool, drain];
             }
         }
     }
