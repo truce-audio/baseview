@@ -50,8 +50,6 @@ While the view was attached, AppKit and the host embedded it in several back-ref
 
 Pro Tools' `DFW_NSContainer` — the container view Pro Tools wraps around the plugin embedding area — walks one of these registries during its own dealloc and messages what is now a freed pointer. Because the crash happens inside Pro Tools' outer pool drain, every host framework (CLAP, VST3 on other DAWs) that doesn't wrap plugin events in their own pools this way is unaffected. It's specific to the AAX + DFW shape.
 
-The JUCE sources do the equivalent cleanup inside `NSViewComponentPeer::~NSViewComponentPeer`.
-
 ### The fix
 
 `src/macos/window.rs`, inside `WindowInner::close()`, before `removeFromSuperview` + `release`:
