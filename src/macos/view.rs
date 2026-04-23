@@ -9,8 +9,8 @@ use crate::{
     WindowEvent, WindowHandler, WindowInfo, WindowOpenOptions,
 };
 use objc2::__framework_prelude::Retained;
-use objc2::rc::Weak;
-use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+use objc2::rc::{autoreleasepool, Weak};
+use objc2::runtime::{AnyObject, NSObjectProtocol, ProtocolObject};
 use objc2::{msg_send, AllocAnyThread};
 use objc2_app_kit::{
     NSApplication, NSDragOperation, NSDraggingInfo, NSEvent, NSFilenamesPboardType, NSTrackingArea,
@@ -123,20 +123,56 @@ impl BaseviewView {
     }
 
     pub fn close(this: ViewRef<Self>) {
-        this.state.closed.set(true);
-        this.view.removeFromSuperview();
+        // Local autorelease pool so any ObjC objects autoreleased
+        // by the teardown below drain here instead of escaping
+        // into an outer host pool — critical for AAX / Pro Tools
+        // where `-[DFW_NSApplication sendEvent:]` wraps the
+        // plugin-close callback in its own pool.
+        autoreleasepool(|_| {
+            this.state.closed.set(true);
 
-        if let ViewParentingType::Windowed { owned_window: parent_window, running_app } =
-            &this.parenting
-        {
-            if let Some(parent_window) = parent_window.load() {
-                parent_window.close();
+            // Strip residual ties to the host window before detaching
+            // and releasing. Any of these left behind leaves a
+            // dangling back-reference somewhere in AppKit (responder
+            // chain, tracking-area registry, layer contents queue)
+            // that can blow up inside the host's later autorelease-
+            // pool drain. Seen in Pro Tools as a crash inside
+            // `-[DFW_NSContainer dealloc]` at a tiny address, where
+            // the container messages its stale reference to our
+            // view.
+            if let Some(window) = this.view.window() {
+                window.makeFirstResponder(None);
+            }
+            let tracking_areas = this.view.trackingAreas();
+            for i in (0..tracking_areas.count()).rev() {
+                let area = tracking_areas.objectAtIndex(i);
+                this.view.removeTrackingArea(&area);
+            }
+            // SAFETY: `-[NSView layer]` returns `CALayer?`; `-[CALayer setContents:]`
+            // accepts a nullable `id`. Safe `NSView::layer` requires the
+            // `objc2-quartz-core` feature on `objc2-app-kit`, which isn't enabled here.
+            unsafe {
+                let layer: Option<&AnyObject> = msg_send![this.view, layer];
+                if let Some(layer) = layer {
+                    let nil: *const AnyObject = std::ptr::null();
+                    let _: () = msg_send![layer, setContents: nil];
+                }
             }
 
-            if let Some(app) = running_app.load() {
-                app.stop(Some(&app));
+            this.view.removeFromSuperview();
+
+            if let ViewParentingType::Windowed { owned_window: parent_window, running_app } =
+                &this.parenting
+            {
+                if let Some(parent_window) = parent_window.load() {
+                    parent_window.close();
+                }
+
+                if let Some(app) = running_app.load() {
+                    app.stop(Some(&app));
+                }
             }
-        }
+        });
     }
 
     pub fn resize(this: ViewRef<Self>, size: Size) {
