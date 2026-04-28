@@ -4,7 +4,10 @@ A low-level windowing system geared towards making audio plugin UIs.
 
 `baseview` abstracts the platform-specific windowing APIs (winapi, cocoa, xcb) into a platform-independent API, but otherwise gets out of your way so you can write plugin UIs.
 
-This is a fork of [RustAudio/baseview](https://github.com/RustAudio/baseview) carrying a fix for Pro Tools (AAX) unload / multi-editor crashes on macOS — see [Pro Tools (AAX) fix](#pro-tools-aax-fix) below.
+This is a fork of [RustAudio/baseview](https://github.com/RustAudio/baseview) carrying:
+
+- A fix for Pro Tools (AAX) unload / multi-editor crashes on macOS — see [Pro Tools (AAX) fix](#pro-tools-aax-fix) below.
+- An implementation of `Window::set_mouse_cursor` for macOS (upstream is `todo!()`).
 
 ## Prerequisites
 
