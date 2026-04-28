@@ -369,8 +369,8 @@ impl<'a> Window<'a> {
         }
     }
 
-    pub fn set_mouse_cursor(&mut self, _mouse_cursor: MouseCursor) {
-        todo!()
+    pub fn set_mouse_cursor(&mut self, mouse_cursor: MouseCursor) {
+        unsafe { super::cursor::set_cursor(mouse_cursor) };
     }
 
     #[cfg(feature = "opengl")]
