@@ -1,7 +1,8 @@
 [package]
-name = "baseview"
-version = "0.1.1"
+name = "baseview-truce"
+version = "0.1.1-truce.1"
 authors = [
+    "truce-audio <https://github.com/truce-audio>",
     "William Light <git@wrl.lhiaudio.com>",
     "Charles Saracco <crsaracco@gmail.com>",
     "Mirko Covizzi <mrkcvzz@gmail.com>",
@@ -14,10 +15,10 @@ authors = [
 ]
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Low-level windowing system geared towards making audio plugin UIs."
+description = "Low-level windowing system geared towards making audio plugin UIs. truce-audio fork of RustAudio/baseview carrying a Pro Tools (AAX) teardown fix and macOS cursor implementation."
 keywords = ["windowing", "audio", "plugin"]
 categories = ["gui"]
-repository = "https://github.com/RustAudio/baseview"
+repository = "https://github.com/truce-audio/baseview"
 
 exclude = [".github"]
 rust-version = "1.80"
