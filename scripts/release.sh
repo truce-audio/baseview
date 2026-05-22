@@ -18,11 +18,6 @@ fi
 
 tag="truce-v$version"
 
-if git rev-parse "$tag" >/dev/null 2>&1; then
-    echo "Tag $tag already exists. Bump version in Cargo.toml first."
-    exit 1
-fi
-
 if ! git diff --quiet || ! git diff --cached --quiet; then
     echo "Working tree dirty. Commit first."
     exit 1
@@ -39,22 +34,32 @@ fi
 echo "Verifying..."
 scripts/verify.sh
 
-# --- Tag & push ---------------------------------------------------------------
+# --- Tag & push (idempotent) -------------------------------------------------
 
-upstream_base=$(git merge-base HEAD origin/master 2>/dev/null || echo "")
-patch_summary=""
-if [[ -n "$upstream_base" ]]; then
-    patch_summary=$(git log --oneline --no-decorate "$upstream_base..HEAD")
-fi
-
-echo "Tagging $tag..."
-git tag -a "$tag" -m "truce release $version
+if git rev-parse "$tag" >/dev/null 2>&1; then
+    if [[ "$(git rev-parse "$tag^{commit}")" != "$(git rev-parse HEAD)" ]]; then
+        echo "Tag $tag exists at a different commit than HEAD."
+        echo "Run scripts/bump.sh to release a new version, or check out the tagged commit."
+        exit 1
+    fi
+    echo "Tag $tag already exists at HEAD. Skipping tag creation."
+else
+    upstream_base=$(git merge-base HEAD origin/master 2>/dev/null || echo "")
+    patch_summary=""
+    if [[ -n "$upstream_base" ]]; then
+        patch_summary=$(git log --oneline --no-decorate "$upstream_base..HEAD")
+    fi
+    echo "Tagging $tag..."
+    git tag -a "$tag" -m "truce release $version
 
 Rebased on upstream $(git rev-parse --short "$upstream_base" 2>/dev/null || echo unknown).
 
 Patches:
 $patch_summary"
+fi
 
+# git push is naturally idempotent — prints "Everything up-to-date" if nothing
+# new — so we don't need to gate it on a remote-ref check.
 echo "Pushing to truce remote..."
 git push truce master
 git push truce "$tag"
