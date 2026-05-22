@@ -16,7 +16,7 @@ if [[ -z "$version" ]]; then
     exit 1
 fi
 
-tag="truce-v$version"
+tag="v$version"
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
     echo "Working tree dirty. Commit first."

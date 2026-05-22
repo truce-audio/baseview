@@ -20,7 +20,7 @@ if [[ -z "$version" ]]; then
     exit 1
 fi
 
-tag="truce-v$version"
+tag="v$version"
 
 # --- Pre-flight --------------------------------------------------------------
 
