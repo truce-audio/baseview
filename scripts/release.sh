@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
 # Tag the current master as a truce release and push it.
-# Optionally publishes to crates.io when invoked with --publish.
+# Crates.io publishing is a separate step — run scripts/publish.sh after this.
 #
 # Reads the version from Cargo.toml. Bump that first, commit, then run this.
 
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
-
-publish=0
-if [[ "${1:-}" == "--publish" ]]; then
-    publish=1
-fi
 
 # --- Read version straight from Cargo.toml (no extra deps) --------------------
 
@@ -64,14 +59,6 @@ echo "Pushing to truce remote..."
 git push truce master
 git push truce "$tag"
 
-if [[ "$publish" -eq 1 ]]; then
-    echo
-    echo "Publishing to crates.io..."
-    cargo publish --dry-run
-    read -r -p "Dry run looks good. Publish for real? [y/N] " ans
-    [[ "$ans" == "y" || "$ans" == "Y" ]] || { echo "Skipped publish."; exit 0; }
-    cargo publish
-fi
-
 echo
 echo "Released $tag."
+echo "To publish to crates.io: scripts/publish.sh"
