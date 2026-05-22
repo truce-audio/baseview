@@ -9,6 +9,8 @@ This is a fork of [RustAudio/baseview](https://github.com/RustAudio/baseview) ca
 - A fix for Pro Tools (AAX) unload / multi-editor crashes on macOS — see [Pro Tools (AAX) fix](#pro-tools-aax-fix) below.
 - An implementation of `Window::set_mouse_cursor` for macOS (upstream is `todo!()`).
 
+> **Note:** This package (`baseview-truce` on crates.io) is a temporary fork intended to live only until these patches are merged upstream into [RustAudio/baseview](https://github.com/RustAudio/baseview). Once upstream carries the fixes, switch back to the canonical crate — there is nothing here that should outlive that merge.
+
 ## Pro Tools (AAX) fix
 
 Upstream baseview on macOS crashes Pro Tools the moment a plugin editor is closed (or another plugin's editor is opened, which closes the first). This section describes the crash we actually observed, why it happens, and the minimal patch that fixes it.

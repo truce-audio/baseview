@@ -40,8 +40,9 @@ if [[ "$(git rev-parse HEAD)" != "$(git rev-parse "$tag^{commit}")" ]]; then
 fi
 
 if curl -sfo /dev/null "https://crates.io/api/v1/crates/$crate/$version"; then
-    echo "$crate $version is already on crates.io."
-    exit 1
+    echo "$crate $version is already on crates.io. Nothing to do."
+    echo "  https://crates.io/crates/$crate/$version"
+    exit 0
 fi
 
 # --- Verify ------------------------------------------------------------------
