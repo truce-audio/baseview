@@ -1,6 +1,6 @@
 [package]
 name = "baseview-truce"
-version = "0.1.2-truce.3"
+version = "0.1.2-truce.4"
 authors = [
     "truce-audio <https://github.com/truce-audio>",
     "William Light <git@wrl.lhiaudio.com>",
