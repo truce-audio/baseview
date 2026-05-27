@@ -3,7 +3,9 @@ use objc2::runtime::AnyObject;
 use objc2::{msg_send, Encoding, Message, RefEncode};
 use objc2_app_kit::{NSDragOperation, NSDraggingInfo, NSEvent, NSView, NSWindow};
 use objc2_core_foundation::CGRect;
-use objc2_foundation::{NSNotification, NSPoint};
+use objc2_foundation::NSNotification;
+#[cfg(feature = "opengl")]
+use objc2_foundation::NSPoint;
 use raw_window_handle::{AppKitWindowHandle, HasRawWindowHandle, RawWindowHandle};
 use std::ffi::{c_void, CStr};
 use std::marker::PhantomData;
@@ -115,6 +117,7 @@ pub trait ViewImpl: Sized {
     fn resign_first_responder(this: ViewRef<Self>) -> bool;
     fn window_should_close(this: ViewRef<Self>) -> bool;
     fn view_did_change_backing_properties(this: ViewRef<Self>);
+    #[cfg(feature = "opengl")]
     fn hit_test(this: ViewRef<'_, Self>, point: NSPoint) -> Option<&NSView>;
     fn view_will_move_to_window(this: ViewRef<Self>, new_window: Option<&NSWindow>);
     fn update_tracking_areas(this: ViewRef<Self>);

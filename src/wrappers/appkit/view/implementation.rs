@@ -55,6 +55,12 @@ pub unsafe fn create_view_class<V: ViewImpl>() -> &'static AnyClass {
             sel!(viewWillMoveToWindow:),
             view_will_move_to_window::<V> as extern "C-unwind" fn(_, _, _) -> _,
         );
+        // Only meaningful when there's a GL render subview to redirect hits
+        // away from (see `BaseviewView::hit_test`). In CPU builds we leave
+        // AppKit's own `hitTest:` in place rather than installing a no-op
+        // override — embedders that present via wgpu/CoreGraphics shouldn't
+        // pay for an override that has nothing to redirect.
+        #[cfg(feature = "opengl")]
         class.add_method(sel!(hitTest:), hit_test::<V> as extern "C-unwind" fn(_, _, _) -> _);
         class.add_method(
             sel!(updateTrackingAreas:),
@@ -181,6 +187,7 @@ extern "C-unwind" fn view_did_change_backing_properties<V: ViewImpl>(
     V::view_did_change_backing_properties(this.inner_ref());
 }
 
+#[cfg(feature = "opengl")]
 extern "C-unwind" fn hit_test<V: ViewImpl>(
     this: &View<V>, _sel: Sel, point: NSPoint,
 ) -> Option<&NSView> {

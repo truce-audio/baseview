@@ -328,23 +328,31 @@ impl ViewImpl for BaseviewView {
     /// through unchanged — we only redirect our own render child, not
     /// anything the consumer may add.
     ///
-    /// No-op without the `opengl` feature: there's no GL subview to
-    /// collapse, so the override pass-through is equivalent to the
-    /// default implementation.
+    /// Only compiled with the `opengl` feature — there's no GL subview
+    /// to redirect hits away from otherwise, so the wrapper layer skips
+    /// installing the `hitTest:` override entirely in CPU builds and
+    /// leaves AppKit's default in place. This matters for embedders
+    /// that present via wgpu/CoreGraphics rather than baseview's
+    /// NSOpenGLView.
+    #[cfg(feature = "opengl")]
     fn hit_test(this: ViewRef<'_, Self>, point: NSPoint) -> Option<&NSView> {
-        let superclass = this.view.class().superclass().unwrap();
-
-        // SAFETY: Our superclass is NSView
-        let super_result: Option<&NSView> =
-            unsafe { msg_send![super(this.view, superclass), hitTest: point] };
+        // Resolve the super target via the `-superclass` *message* (as the
+        // keyboard handlers and `viewWillMoveToWindow:` above do), NOT via
+        // `this.view.class()`. objc2's `.class()` is `object_getClass` — the
+        // real isa — so once AppKit isa-swizzles this view into a KVO
+        // subclass (NSKVONotifying_*), `.superclass()` resolves to the class
+        // that defines `hit_test` and the super-send re-enters this method,
+        // recursing until the stack overflows. `-superclass` routes through
+        // the KVO-overridden `-class`, so it stays anchored at NSView.
+        let super_result: Option<&NSView> = unsafe {
+            let superclass = msg_send![this.view, superclass];
+            msg_send![super(this.view, superclass), hitTest: point]
+        };
         let super_result = super_result?;
 
-        #[cfg(feature = "opengl")]
-        {
-            if let Some(gl_context) = this.gl_context.get() {
-                if super_result == gl_context.ns_view() {
-                    return Some(this.view);
-                }
+        if let Some(gl_context) = this.gl_context.get() {
+            if super_result == gl_context.ns_view() {
+                return Some(this.view);
             }
         }
 
