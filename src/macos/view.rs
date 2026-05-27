@@ -182,6 +182,11 @@ unsafe fn create_view_class() -> &'static AnyClass {
             sel!(viewWillMoveToWindow:),
             view_will_move_to_window as extern "C-unwind" fn(_, _, _) -> _,
         );
+        // Only meaningful with a GL render subview to redirect hits away
+        // from (see `hit_test`). truce-gui presents via wgpu/CoreGraphics,
+        // not baseview's NSOpenGLView, so in CPU builds we leave AppKit's
+        // own `hitTest:` in place rather than installing a no-op override.
+        #[cfg(feature = "opengl")]
         class.add_method(sel!(hitTest:), hit_test as extern "C-unwind" fn(_, _, _) -> _);
         class.add_method(
             sel!(updateTrackingAreas:),
@@ -378,20 +383,26 @@ fn new_tracking_area(this: &NSView) -> Retained<NSTrackingArea> {
 /// No-op without the `opengl` feature: there's no GL subview to
 /// collapse, so the override pass-through is equivalent to the
 /// default implementation.
+#[cfg(feature = "opengl")]
 extern "C-unwind" fn hit_test(this: &NSView, _sel: Sel, point: NSPoint) -> Option<&NSView> {
-    let superclass = this.class().superclass().unwrap();
-    // SAFETY: Our superclass is NSView
-    let super_result: Option<&NSView> =
-        unsafe { msg_send![super(this, superclass), hitTest: point] };
+    // Resolve the super target via the `-superclass` *message* (as the
+    // keyboard handlers and `viewWillMoveToWindow:` above do), NOT via
+    // `this.class()`. objc2's `this.class()` is `object_getClass` - the
+    // real isa - so once AppKit isa-swizzles this view into a KVO
+    // subclass (NSKVONotifying_*), `.superclass()` resolves to the class
+    // that defines `hit_test` and the super-send re-enters this method,
+    // recursing until the stack overflows. `-superclass` routes through
+    // the KVO-overridden `-class`, so it stays anchored at NSView.
+    let super_result: Option<&NSView> = unsafe {
+        let superclass = msg_send![this, superclass];
+        msg_send![super(this, superclass), hitTest: point]
+    };
     let super_result = super_result?;
 
-    #[cfg(feature = "opengl")]
-    {
-        let state = unsafe { WindowState::from_view(this) };
-        if let Some(gl_context) = state.window_inner.gl_context.as_ref() {
-            if super_result == gl_context.ns_view() {
-                return Some(this);
-            }
+    let state = unsafe { WindowState::from_view(this) };
+    if let Some(gl_context) = state.window_inner.gl_context.as_ref() {
+        if super_result == gl_context.ns_view() {
+            return Some(this);
         }
     }
 
