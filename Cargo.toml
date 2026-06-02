@@ -1,6 +1,6 @@
 [package]
 name = "baseview-truce"
-version = "0.1.1-truce.4"
+version = "0.1.1-truce.5"
 authors = [
     "truce-audio <https://github.com/truce-audio>",
     "William Light <git@wrl.lhiaudio.com>",
@@ -33,8 +33,21 @@ opengl = [
     "objc2-app-kit/objc2-open-gl"
 ]
 
+# [lib].name is `baseview` (not the default `baseview_truce` cargo
+# would synthesize from the package name): lets downstream `[patch]`
+# sections substitute this crate cleanly for upstream `baseview`
+# without requiring a wrapper shim. vizia and any other consumer
+# pinning baseview via git/crates.io can now do
+# `[patch.<source>] baseview = { package = "baseview-truce" }`
+# and have the substitution link, since rustc sees a crate named
+# `baseview` either way. truce's existing consumers go through the
+# workspace alias `baseview = { package = "baseview-truce", ... }`
+# so their `use baseview::*` lines are unaffected.
+[lib]
+name = "baseview"
+
 [dependencies]
-keyboard-types = { version = "0.6.1", default-features = false }
+keyboard-types = { version = "0.7", default-features = false }
 raw-window-handle = "0.5"
 
 [target.'cfg(target_os="linux")'.dependencies]
