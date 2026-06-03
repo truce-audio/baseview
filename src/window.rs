@@ -63,7 +63,7 @@ impl<'a> Window<'a> {
     }
 
     #[cfg(not(target_os = "windows"))]
-    pub(crate) fn new(window: platform::Window) -> Window {
+    pub(crate) fn new(window: platform::Window<'a>) -> Window<'a> {
         Window { window, phantom: PhantomData }
     }
 
