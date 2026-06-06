@@ -399,6 +399,36 @@ impl ViewImpl for BaseviewView {
         this.view.addTrackingArea(&tracking_area);
     }
 
+    /// Override of `-[NSView setFrameSize:]`. AppKit calls this whenever
+    /// the view's frame size mutates — parent autoresize, host-driven
+    /// `setFrameSize:`, or our own `Window::resize` trampoline. The base
+    /// class doesn't emit any plugin-friendly notification on this path,
+    /// so without this hook hosts that resize the parent NSView leave
+    /// the editor's wgpu/Metal surface stuck at the original logical
+    /// size (AppKit happily scales the texture to fill the new frame —
+    /// what users see as squashed/stretched UI). The wrapper invokes
+    /// super before calling here, so we just observe the new bounds and
+    /// emit `Resized` when the physical size actually changed.
+    fn set_frame_size(this: ViewRef<Self>, _new_size: NSSize) {
+        let new_window_info = Self::fetch_view_size(this.view);
+        let window_info = this.state.window_info.get();
+
+        if new_window_info.physical_size() != window_info.physical_size() {
+            this.state.window_info.set(new_window_info);
+            // Deferrable (not `trigger_event`) because AppKit may call
+            // `setFrameSize:` reentrantly while `window_handler` is
+            // already borrowed — e.g. during a paint pass: `on_frame`
+            // borrows the handler, a CAMetalLayer present schedules a
+            // layout cycle that calls `setFrameSize:` on subviews. A
+            // second `borrow_mut` would panic and unwind across ObjC
+            // frames; the deferrable variant queues the event instead.
+            Self::trigger_deferrable_event(
+                this,
+                Event::Window(WindowEvent::Resized(new_window_info)),
+            );
+        }
+    }
+
     fn mouse_moved(this: ViewRef<Self>, event: &NSEvent) {
         let point = this.view.convertPoint_fromView(event.locationInWindow(), None);
 

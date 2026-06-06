@@ -5,6 +5,7 @@ use objc2::ffi::objc_disposeClassPair;
 use objc2::runtime::ClassBuilder;
 use objc2::{msg_send, sel, ClassType};
 use objc2_app_kit::{NSEvent, NSView};
+use objc2_foundation::NSSize;
 use std::ffi::c_void;
 
 /// # Safety
@@ -54,6 +55,20 @@ pub unsafe fn create_view_class<V: ViewImpl>() -> &'static AnyClass {
         class.add_method(
             sel!(viewWillMoveToWindow:),
             view_will_move_to_window::<V> as extern "C-unwind" fn(_, _, _) -> _,
+        );
+        // `setFrameSize:` fires whenever AppKit mutates our frame —
+        // parent-autoresize, host-driven `setFrameSize:`, or our own
+        // `Window::resize` trampoline. AppKit itself doesn't emit any
+        // plugin-friendly notification on this path, so without this
+        // override hosts that resize the parent NSView leave the editor's
+        // wgpu/Metal surface stuck at the original logical size (AppKit
+        // happily scales the texture to fill the new frame, which users
+        // see as squashed/stretched UI). The override calls super first
+        // so AppKit's bookkeeping (intrinsic content size, subview
+        // autoresizing) runs before the impl observes the new bounds.
+        class.add_method(
+            sel!(setFrameSize:),
+            set_frame_size::<V> as extern "C-unwind" fn(_, _, _),
         );
         // Only meaningful when there's a GL render subview to redirect hits
         // away from (see `BaseviewView::hit_test`). In CPU builds we leave
@@ -198,6 +213,17 @@ extern "C-unwind" fn view_will_move_to_window<V: ViewImpl>(
     this: &View<V>, _self: Sel, new_window: Option<&NSWindow>,
 ) {
     V::view_will_move_to_window(this.inner_ref(), new_window);
+}
+
+extern "C-unwind" fn set_frame_size<V: ViewImpl>(this: &View<V>, _: Sel, new_size: NSSize) {
+    // Call super first so AppKit's frame bookkeeping completes before
+    // the impl observes the new bounds. The `ViewImpl` is responsible
+    // for any further behavior (event emission, etc.).
+    unsafe {
+        let superclass: &AnyClass = msg_send![this, superclass];
+        let _: () = msg_send![super(this, superclass), setFrameSize: new_size];
+    }
+    V::set_frame_size(this.inner_ref(), new_size);
 }
 
 extern "C-unwind" fn update_tracking_areas<V: ViewImpl>(this: &View<V>, _self: Sel, _: &AnyObject) {

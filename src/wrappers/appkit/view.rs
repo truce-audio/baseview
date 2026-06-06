@@ -3,7 +3,7 @@ use objc2::runtime::AnyObject;
 use objc2::{msg_send, Encoding, Message, RefEncode};
 use objc2_app_kit::{NSDragOperation, NSDraggingInfo, NSEvent, NSView, NSWindow};
 use objc2_core_foundation::CGRect;
-use objc2_foundation::NSNotification;
+use objc2_foundation::{NSNotification, NSSize};
 #[cfg(feature = "opengl")]
 use objc2_foundation::NSPoint;
 use raw_window_handle::{AppKitWindowHandle, HasRawWindowHandle, RawWindowHandle};
@@ -120,6 +120,7 @@ pub trait ViewImpl: Sized {
     #[cfg(feature = "opengl")]
     fn hit_test(this: ViewRef<'_, Self>, point: NSPoint) -> Option<&NSView>;
     fn view_will_move_to_window(this: ViewRef<Self>, new_window: Option<&NSWindow>);
+    fn set_frame_size(this: ViewRef<Self>, new_size: NSSize);
     fn update_tracking_areas(this: ViewRef<Self>);
     fn mouse_moved(this: ViewRef<Self>, event: &NSEvent);
     fn scroll_wheel(this: ViewRef<Self>, event: &NSEvent);
