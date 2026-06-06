@@ -4,12 +4,17 @@ A low-level windowing system geared towards making audio plugin UIs.
 
 `baseview` abstracts the platform-specific windowing APIs (winapi, cocoa, xcb) into a platform-independent API, but otherwise gets out of your way so you can write plugin UIs.
 
-This is a fork of [RustAudio/baseview](https://github.com/RustAudio/baseview) carrying:
+This is a fork of [RustAudio/baseview](https://github.com/RustAudio/baseview) (published on crates.io as `baseview-truce`) carrying patches that haven't yet made it into the upstream crate:
 
-- A fix for Pro Tools (AAX) unload / multi-editor crashes on macOS — see [Pro Tools (AAX) fix](#pro-tools-aax-fix) below.
-- An implementation of `Window::set_mouse_cursor` for macOS (upstream is `todo!()`).
+- **Pro Tools (AAX) teardown crash fix** on macOS — see [Pro Tools (AAX) fix](#pro-tools-aax-fix).
+- **Host-driven NSView resize → `Resized` events** on macOS — see [macOS frame-change Resized events](#macos-frame-change-resized-events).
+- **`Window::set_mouse_cursor` for macOS** — upstream is `todo!()`, see [macOS cursor implementation](#macos-cursor-implementation).
+- **`hit_test` gated behind `opengl` cfg** so CPU-only renderers (wgpu via `CAMetalLayer`, CoreGraphics blit) get AppKit's default hit-testing back — see [CPU-only hit-test gate](#cpu-only-hit-test-gate).
+- **Crate renamed for `[patch]` ergonomics**: `package = "baseview-truce"`, `[lib].name = "baseview"`. Downstream `[patch.crates-io] baseview = { package = "baseview-truce" }` links cleanly because rustc still sees a crate named `baseview`.
+- **Dependency refresh**: `keyboard-types` 0.7, migrated from the legacy `objc` / `cocoa` crates to the `objc2` family, added `objc2-quartz-core`.
+- **Release scripts** under `scripts/` for bumping, publishing, verifying, and syncing with upstream — see [Release scripts](#release-scripts).
 
-> **Note:** This package (`baseview-truce` on crates.io) is a temporary fork intended to live only until these patches are merged upstream into [RustAudio/baseview](https://github.com/RustAudio/baseview). Once upstream carries the fixes, switch back to the canonical crate — there is nothing here that should outlive that merge.
+> **Note:** This package is a temporary fork intended to live only until these patches are merged upstream into [RustAudio/baseview](https://github.com/RustAudio/baseview). Once upstream carries the fixes, switch back to the canonical crate — there is nothing here that should outlive that merge.
 
 ## Pro Tools (AAX) fix
 
@@ -55,6 +60,43 @@ Pro Tools' `DFW_NSContainer` — the container view Pro Tools wraps around the p
 4. `[view.layer setContents: nil]` to drop the layer's image.
 
 That's the whole patch — about 35 added lines in a single file. See the `git diff` vs upstream master.
+
+## macOS frame-change Resized events
+
+Upstream baseview on macOS only fires `WindowEvent::Resized` from `viewDidChangeBackingProperties:`, which AppKit only calls on **backing-scale** changes (the view moves to a different monitor). Every other path that mutates the NSView's frame size — the parent's `autoresizingMask` shrinking / growing the child during a host-window drag, the host directly calling `setFrameSize:` on the embedded view, even baseview's own `Window::resize` trampoline — runs **without** firing `Resized`.
+
+For plugin editors that render through a `CAMetalLayer` (wgpu, anything blitting through `setContents:`) this is the difference between a clean resize and squashed knobs:
+
+- The NSView's frame grows (autoresize works fine).
+- The CAMetalLayer's frame implicitly tracks the NSView (good).
+- The CAMetalLayer's `drawableSize` (the size of the texture wgpu / CoreGraphics actually paints into) **stays at the old logical size**.
+- AppKit composites the small texture into the larger frame, stretching it across the new bounds.
+
+The fix is a single `setFrameSize:` override on baseview's NSView subclass. It calls `super` first (so AppKit's bookkeeping — intrinsic content size, propagation to subview autoresize masks, etc. — runs unchanged), reads the new bounds, and emits `WindowEvent::Resized` with the same `WindowInfo` shape `viewDidChangeBackingProperties:` uses. Backends (egui / iced / slint / vizia) already react to `Resized` by reconfiguring their surfaces, so this single override fixes resize for every backend and every plugin format that embeds via `setFrameSize:`.
+
+LV2 in particular relies on this path heavily: the LV2 UI spec gives the host a `ui:resize` extension to push size changes through, but in practice most hosts (Ardour, Reaper LV2, jalv-gtk on macOS) just resize the parent NSView and expect the child's autoresize mask to do the rest. Without this patch, the editor's wgpu surface stays at the original size and the user sees stretched / squashed content.
+
+## macOS cursor implementation
+
+Upstream `src/macos/cursor.rs` returns `todo!()` for every cursor variant — calling `Window::set_mouse_cursor` on macOS crashes. This fork ports the whole [`MouseCursor`](src/window.rs) enum to the corresponding AppKit `NSCursor`s via `objc2-app-kit`, with `NSCursor::arrowCursor`, `iBeamCursor`, `pointingHandCursor`, `crosshairCursor`, etc. mapped one-to-one where AppKit has a direct equivalent and falling back to the closest cursor for variants AppKit doesn't ship (e.g. `MouseCursor::Hand` → `pointingHandCursor`, `Help` → `arrowCursor`).
+
+The implementation also handles dynamic cursor updates: AppKit's cursor only sticks while the cursor is over the view, so the fork installs the cursor inside the `cursorUpdate:` path so it persists across `NSTrackingArea` re-entries instead of reverting to whatever cursor the host's outer container last set.
+
+## CPU-only hit-test gate
+
+Upstream baseview's `-[NSView hitTest:]` override always runs, even when the consumer isn't using the OpenGL render path. That override exists to redirect hit-tests away from a GL render subview so input events land on baseview's main view; with no GL subview present it has nothing to redirect and can leave events unhandled (cursor reverts to the host's last-set cursor, drags don't start cleanly).
+
+This fork gates the `hitTest:` method registration behind `#[cfg(feature = "opengl")]`. Consumers using baseview purely for windowing + CPU rendering (truce-gui via wgpu / CoreGraphics, anyone painting through `setContents:`) get AppKit's default hit-testing back, which behaves correctly for top-level NSViews.
+
+## Release scripts
+
+`scripts/` carries the publishing workflow for the fork:
+
+- `scripts/bump.sh <version>` — bump the version in `Cargo.toml` + workspace examples, regenerate `Cargo.lock`, and commit.
+- `scripts/release.sh` — drives the full release: verify → bump → publish, with confirmation prompts at each step.
+- `scripts/publish.sh` — `cargo publish` to crates.io once a release commit is tagged.
+- `scripts/verify.sh` — clippy + tests + docs pass before release.
+- `scripts/sync-upstream.sh` — fetch RustAudio/baseview's `master` and either merge or rebase the truce-fork patches on top, used to pick up upstream changes before bumping. Keeps the patch set small by replaying onto the latest upstream rather than letting the fork drift.
 
 ## License
 
