@@ -409,12 +409,24 @@ impl ViewImpl for BaseviewView {
     /// what users see as squashed/stretched UI). The wrapper invokes
     /// super before calling here, so we just observe the new bounds and
     /// emit `Resized` when the physical size actually changed.
-    fn set_frame_size(this: ViewRef<Self>, _new_size: NSSize) {
+    fn set_frame_size(this: ViewRef<Self>, new_size: NSSize) {
         let new_window_info = Self::fetch_view_size(this.view);
         let window_info = this.state.window_info.get();
 
         if new_window_info.physical_size() != window_info.physical_size() {
             this.state.window_info.set(new_window_info);
+            // On the OpenGL feature path, AppKit's autoresize of the
+            // NSView doesn't reconfigure the attached NSOpenGLContext's
+            // drawable — skia/vizia would keep drawing into the original
+            // framebuffer dimensions while the view itself has grown.
+            // Mirror what `Self::resize` does so the GL backbuffer
+            // tracks the visible frame.
+            #[cfg(feature = "opengl")]
+            if let Some(gl_context) = this.gl_context.get() {
+                gl_context.resize(new_size);
+            }
+            #[cfg(not(feature = "opengl"))]
+            let _ = new_size;
             // Deferrable (not `trigger_event`) because AppKit may call
             // `setFrameSize:` reentrantly while `window_handler` is
             // already borrowed — e.g. during a paint pass: `on_frame`
