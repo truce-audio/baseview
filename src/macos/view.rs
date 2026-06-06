@@ -17,6 +17,7 @@ use objc2_foundation::{
     NSArray, NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize, NSString,
 };
 use std::ffi::{c_void, CStr, CString};
+use std::rc::Rc;
 
 use super::keyboard::make_modifiers;
 use super::window::WindowState;
@@ -210,6 +211,15 @@ unsafe fn create_view_class() -> &'static AnyClass {
             sel!(viewDidChangeBackingProperties:),
             view_did_change_backing_properties as extern "C-unwind" fn(_, _, _) -> _,
         );
+        // `setFrameSize:` fires whenever AppKit mutates our frame -
+        // parent-autoresize, host-driven `setFrameSize:`, or our
+        // own `Window::resize` trampoline. The override emits a
+        // `Resized` event so editors can reconfigure their wgpu
+        // surface (the base class doesn't notify on this path).
+        class.add_method(
+            sel!(setFrameSize:),
+            set_frame_size as extern "C-unwind" fn(_, _, _),
+        );
 
         class.add_method(
             sel!(draggingEntered:),
@@ -333,6 +343,87 @@ extern "C-unwind" fn view_did_change_backing_properties(this: &NSView, _: Sel, _
     if new_window_info.physical_size() != window_info.physical_size() {
         state.window_info.set(new_window_info);
         state.trigger_event(Event::Window(WindowEvent::Resized(new_window_info)));
+    }
+}
+
+/// Override of `-[NSView setFrameSize:]`. AppKit calls this whenever
+/// the view's frame size mutates - the parent's autoresize mask
+/// shrinking / growing us in response to a host-window drag, the
+/// embedder calling `setFrameSize:` directly, our own `Window::resize`
+/// trampoline, etc. The base class doesn't emit any plugin-friendly
+/// notification on this path, so without this hook hosts that
+/// resize the parent NSView leave the editor's wgpu surface stuck at
+/// the original logical size (AppKit happily scales the texture to
+/// fill the new frame, which is exactly what users see as squashed /
+/// stretched knobs).
+///
+/// We call `super` first so AppKit's own bookkeeping (intrinsic
+/// content size, autoresizing of subviews, etc.) runs before we
+/// observe the new bounds, then emit `Resized` so each backend's
+/// `on_event` handler reconfigures its surface.
+extern "C-unwind" fn set_frame_size(this: &NSView, _: Sel, new_size: NSSize) {
+    unsafe {
+        let _: () = msg_send![super(this, NSView::class()), setFrameSize: new_size];
+    }
+
+    // `setFrameSize:` is invoked by `NSView::initWithFrame:`
+    // *before* `create_view`'s caller installs the
+    // `BASEVIEW_STATE_IVAR`, so the first call lands on an
+    // uninitialised ivar (raw null pointer). `WindowState::from_view`
+    // would unwrap-then-`Rc::from_raw(null)` and unleash undefined
+    // behaviour. Read the ivar raw here and bail out when it isn't
+    // set yet - AppKit will call `setFrameSize:` again for the
+    // real frame once construction finishes.
+    let state_ptr = unsafe {
+        this.class()
+            .instance_variable(BASEVIEW_STATE_IVAR)
+            .and_then(|iv| {
+                let raw = iv.load::<*const c_void>(this);
+                if raw.is_null() {
+                    None
+                } else {
+                    Some(raw.cast::<WindowState>())
+                }
+            })
+    };
+    let Some(state_ptr) = state_ptr else {
+        return;
+    };
+    // SAFETY: `BASEVIEW_STATE_IVAR` is set to a leaked
+    // `Rc<WindowState>` raw pointer in `window.rs`; clone the Rc
+    // without taking ownership so the original raw pointer stays
+    // valid for the rest of the view's lifetime.
+    let state: Rc<WindowState> = unsafe {
+        let owned = Rc::from_raw(state_ptr);
+        let cloned = Rc::clone(&owned);
+        let _ = Rc::into_raw(owned);
+        cloned
+    };
+
+    let ns_window = this.window();
+    let scale_factor: f64 = ns_window.map(|w| w.backingScaleFactor()).unwrap_or(1.0);
+
+    let bounds = this.bounds();
+    let new_window_info = WindowInfo::from_logical_size(
+        Size::new(bounds.size.width, bounds.size.height),
+        scale_factor,
+    );
+
+    let window_info = state.window_info.get();
+    if new_window_info.physical_size() != window_info.physical_size() {
+        state.window_info.set(new_window_info);
+        // `trigger_deferrable_event` (not `trigger_event`) because
+        // AppKit may call `setFrameSize:` reentrantly while
+        // `window_handler` is already borrowed - e.g. during a
+        // paint pass: `on_frame` borrows the handler, renderers
+        // schedule a `CAMetalLayer` present, which triggers an
+        // AppKit layout cycle that calls `setFrameSize:` on
+        // subviews. A second `borrow_mut` panics, the panic
+        // unwinds across ObjC frames, and `[NSApplication run]`
+        // rethrows it as `objc_exception_rethrow` (project-load
+        // crash). The deferrable variant queues the event
+        // instead of borrowing again when the handler is busy.
+        state.trigger_deferrable_event(Event::Window(WindowEvent::Resized(new_window_info)));
     }
 }
 
