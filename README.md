@@ -10,9 +10,6 @@ This is a fork of [RustAudio/baseview](https://github.com/RustAudio/baseview) (p
 - **Host-driven NSView resize → `Resized` events** on macOS — see [macOS frame-change Resized events](#macos-frame-change-resized-events).
 - **`Window::set_mouse_cursor` for macOS** — upstream is `todo!()`, see [macOS cursor implementation](#macos-cursor-implementation).
 - **`hit_test` gated behind `opengl` cfg** so CPU-only renderers (wgpu via `CAMetalLayer`, CoreGraphics blit) get AppKit's default hit-testing back — see [CPU-only hit-test gate](#cpu-only-hit-test-gate).
-- **Crate renamed for `[patch]` ergonomics**: `package = "baseview-truce"`, `[lib].name = "baseview"`. Downstream `[patch.crates-io] baseview = { package = "baseview-truce" }` links cleanly because rustc still sees a crate named `baseview`.
-- **Dependency refresh**: `keyboard-types` 0.7, migrated from the legacy `objc` / `cocoa` crates to the `objc2` family, added `objc2-quartz-core`.
-- **Release scripts** under `scripts/` for bumping, publishing, verifying, and syncing with upstream — see [Release scripts](#release-scripts).
 
 > **Note:** This package is a temporary fork intended to live only until these patches are merged upstream into [RustAudio/baseview](https://github.com/RustAudio/baseview). Once upstream carries the fixes, switch back to the canonical crate — there is nothing here that should outlive that merge.
 
