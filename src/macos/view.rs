@@ -216,10 +216,7 @@ unsafe fn create_view_class() -> &'static AnyClass {
         // own `Window::resize` trampoline. The override emits a
         // `Resized` event so editors can reconfigure their wgpu
         // surface (the base class doesn't notify on this path).
-        class.add_method(
-            sel!(setFrameSize:),
-            set_frame_size as extern "C-unwind" fn(_, _, _),
-        );
+        class.add_method(sel!(setFrameSize:), set_frame_size as extern "C-unwind" fn(_, _, _));
 
         class.add_method(
             sel!(draggingEntered:),
@@ -375,16 +372,14 @@ extern "C-unwind" fn set_frame_size(this: &NSView, _: Sel, new_size: NSSize) {
     // set yet - AppKit will call `setFrameSize:` again for the
     // real frame once construction finishes.
     let state_ptr = unsafe {
-        this.class()
-            .instance_variable(BASEVIEW_STATE_IVAR)
-            .and_then(|iv| {
-                let raw = iv.load::<*const c_void>(this);
-                if raw.is_null() {
-                    None
-                } else {
-                    Some(raw.cast::<WindowState>())
-                }
-            })
+        this.class().instance_variable(BASEVIEW_STATE_IVAR).and_then(|iv| {
+            let raw = iv.load::<*const c_void>(this);
+            if raw.is_null() {
+                None
+            } else {
+                Some(raw.cast::<WindowState>())
+            }
+        })
     };
     let Some(state_ptr) = state_ptr else {
         return;
