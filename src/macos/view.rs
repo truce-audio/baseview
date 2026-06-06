@@ -407,6 +407,17 @@ extern "C-unwind" fn set_frame_size(this: &NSView, _: Sel, new_size: NSSize) {
     let window_info = state.window_info.get();
     if new_window_info.physical_size() != window_info.physical_size() {
         state.window_info.set(new_window_info);
+        // On the OpenGL feature path, AppKit's autoresize of the
+        // NSView doesn't reconfigure the attached NSOpenGLContext's
+        // drawable - skia / vizia would keep drawing into the
+        // original framebuffer dimensions while the view itself
+        // has grown. Mirror what `Window::resize` does (see
+        // `window.rs`) so the GL backbuffer tracks the visible
+        // frame.
+        #[cfg(feature = "opengl")]
+        if let Some(gl_context) = state.window_inner.gl_context.as_ref() {
+            gl_context.resize(new_size);
+        }
         // `trigger_deferrable_event` (not `trigger_event`) because
         // AppKit may call `setFrameSize:` reentrantly while
         // `window_handler` is already borrowed - e.g. during a
