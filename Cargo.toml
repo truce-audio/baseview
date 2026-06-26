@@ -2,7 +2,7 @@
 name = "baseview-truce"
 version = "0.1.1-truce.9"
 authors = [
-    "truce-audio <https://github.com/truce-audio>",
+    "Mahae Koh <mahae@truce.audio>",
     "William Light <git@wrl.lhiaudio.com>",
     "Charles Saracco <crsaracco@gmail.com>",
     "Mirko Covizzi <mrkcvzz@gmail.com>",
