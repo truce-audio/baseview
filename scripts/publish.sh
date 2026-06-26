@@ -8,6 +8,8 @@
 
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+
 cd "$(git rev-parse --show-toplevel)"
 
 crate="baseview-truce"
@@ -53,8 +55,8 @@ scripts/verify.sh
 # --- Dry run -----------------------------------------------------------------
 
 echo
-echo "==> cargo publish --dry-run -p $crate"
-cargo publish --dry-run -p "$crate"
+echo "==> $CARGO publish --dry-run -p $crate"
+"$CARGO" publish --dry-run -p "$crate"
 
 echo
 echo "Dry run succeeded for $crate $version."
@@ -63,7 +65,7 @@ read -r -p "Publish for real to crates.io? [y/N] " ans
 
 # --- Publish -----------------------------------------------------------------
 
-cargo publish -p "$crate"
+"$CARGO" publish -p "$crate"
 
 echo
 echo "Published $crate $version."

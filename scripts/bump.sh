@@ -7,6 +7,8 @@
 
 set -euo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+
 cd "$(git rev-parse --show-toplevel)"
 
 if ! git diff --quiet || ! git diff --cached --quiet; then
@@ -41,9 +43,14 @@ awk -v new="$next" '
 ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
 
 # Refresh Cargo.lock so the new version lands there too.
-cargo check --offline --quiet 2>/dev/null || cargo check --quiet
+"$CARGO" check --offline --quiet 2>/dev/null || "$CARGO" check --quiet
 
-git add Cargo.toml Cargo.lock
+git add Cargo.toml
+# Cargo.lock is normally tracked for the fork, but some checkouts gitignore
+# it; staging an ignored path errors out, so only add it when git accepts it.
+if ! git check-ignore -q Cargo.lock; then
+    git add Cargo.lock
+fi
 git commit -m "Bump version to $next"
 
 echo "Committed. Next: scripts/release.sh"
