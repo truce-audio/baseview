@@ -1,4 +1,7 @@
 use windows_core::{ComObject, Interface, Result, HSTRING};
+use windows_sys::Win32::Media::{
+    timeKillEvent, timeSetEvent, TIME_CALLBACK_FUNCTION, TIME_KILL_SYNCHRONOUS, TIME_PERIODIC,
+};
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
     System::Ole::{OleInitialize, RevokeDragDrop},
@@ -23,9 +26,6 @@ use windows_sys::Win32::{
             WS_MINIMIZEBOX, WS_POPUPWINDOW, WS_SIZEBOX, WS_VISIBLE,
         },
     },
-};
-use windows_sys::Win32::Media::{
-    timeKillEvent, timeSetEvent, TIME_CALLBACK_FUNCTION, TIME_KILL_SYNCHRONOUS, TIME_PERIODIC,
 };
 
 use std::cell::{Cell, Ref, RefCell};
