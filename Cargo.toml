@@ -20,7 +20,11 @@ keywords = ["windowing", "audio", "plugin"]
 categories = ["gui"]
 repository = "https://github.com/truce-audio/baseview"
 
-exclude = [".github"]
+# `scripts` holds the release tooling (bump / verify / publish); it has no
+# business in the published crate. Excluding it also keeps `cargo publish`
+# from dirty-checking those files, which the executable bit (100755) makes
+# libgit2 report as modified on Windows even when the tree is clean.
+exclude = [".github", "scripts"]
 rust-version = "1.80"
 
 [features]
