@@ -24,11 +24,16 @@ use windows_sys::Win32::{
         },
     },
 };
+use windows_sys::Win32::Media::{
+    timeKillEvent, timeSetEvent, TIME_CALLBACK_FUNCTION, TIME_KILL_SYNCHRONOUS, TIME_PERIODIC,
+};
 
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::VecDeque;
 use std::ptr::null_mut;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use raw_window_handle::{
     HasRawDisplayHandle, HasRawWindowHandle, RawDisplayHandle, RawWindowHandle, Win32WindowHandle,
@@ -64,7 +69,47 @@ fn LOWORD(lparam: LPARAM) -> u16 {
     (lparam & 0xffff) as u16
 }
 
+/// Fallback `WM_TIMER` id, used only if the multimedia timer below
+/// fails to start (see [`WindowState::start_frame_timer`]).
 const WIN_FRAME_TIMER: usize = 4242;
+
+/// Posted by the frame timer to drive one `on_frame`. Replaces a
+/// `WM_TIMER`: Windows synthesizes `WM_TIMER` only when the message
+/// queue is otherwise empty and coalesces missed intervals into a
+/// single message, so under a busy host message pump the editor's
+/// frames starve and then arrive in a burst. A posted message is
+/// delivered at normal priority and is never coalesced.
+const BV_FRAME_TICK: u32 = WM_USER + 2;
+
+/// Editor frame interval in milliseconds (~66 fps).
+const FRAME_INTERVAL_MS: u32 = 15;
+
+/// Context handed to the multimedia-timer callback, which runs on a
+/// winmm-owned thread. Owned by the leaked `Box` whose pointer is the
+/// timer's `dwUser`; reclaimed in [`WindowState::stop_frame_timer`]
+/// after `timeKillEvent` (registered `TIME_KILL_SYNCHRONOUS`) has
+/// guaranteed no callback is in flight.
+struct FrameTimerCtx {
+    hwnd: HWND,
+    /// Shared with the GUI thread. The callback posts a tick only when
+    /// this is clear, bounding the queue to one outstanding frame so a
+    /// stalled pump coalesces to a single catch-up frame instead of a
+    /// backlog that floods the queue and repaints in a burst.
+    pending: Arc<AtomicBool>,
+}
+
+unsafe extern "system" fn frame_timer_callback(
+    _id: u32, _msg: u32, dw_user: usize, _dw1: usize, _dw2: usize,
+) {
+    // SAFETY: `dw_user` is the `Box<FrameTimerCtx>` pointer passed to
+    // `timeSetEvent`; it stays live until `timeKillEvent` (synchronous)
+    // returns, after which no further callbacks run. `hwnd` is only
+    // passed to `PostMessageW`, which is callable from any thread.
+    let ctx = &*(dw_user as *const FrameTimerCtx);
+    if !ctx.pending.swap(true, Ordering::AcqRel) {
+        PostMessageW(ctx.hwnd, BV_FRAME_TICK, 0, 0);
+    }
+}
 
 pub struct WindowHandle {
     hwnd: Option<HWND>,
@@ -218,6 +263,11 @@ impl WindowImpl for BaseviewWindow {
         };
         *window_state.handler.borrow_mut() = Some(handler);
 
+        // Start the frame timer last: its first tick fires ~one interval
+        // later, by which point `WM_SHOWWINDOW` (posted right after
+        // `create_window` returns) has been handled.
+        window_state.start_frame_timer();
+
         Ok(())
     }
 
@@ -247,6 +297,7 @@ impl WindowImpl for BaseviewWindow {
     }
 
     fn before_destroy(&self, window: HWnd) {
+        self.window_state.stop_frame_timer();
         unsafe { RevokeDragDrop(window.as_raw()) };
     }
 }
@@ -383,7 +434,16 @@ unsafe fn wnd_proc_inner(
 
             None
         }
+        BV_FRAME_TICK => {
+            // Clear before rendering so a tick that fires during this
+            // frame re-arms the timer for the next one rather than
+            // being dropped.
+            window_state.frame_pending.store(false, Ordering::Release);
+            window_state.handle_on_frame();
+            Some(0)
+        }
         WM_TIMER => {
+            // Fallback path only (multimedia timer unavailable).
             if wparam == WIN_FRAME_TIMER {
                 window_state.handle_on_frame()
             }
@@ -544,8 +604,27 @@ pub(super) struct WindowState {
     /// window state at the same time.
     pub deferred_tasks: RefCell<VecDeque<WindowTask>>,
 
+    /// Set when a frame tick has been posted and not yet handled, so the
+    /// timer callback never queues more than one. Shared with the
+    /// callback thread via [`FrameTimerCtx`].
+    frame_pending: Arc<AtomicBool>,
+    /// `timeSetEvent` id (0 = unset / multimedia timer unavailable) and
+    /// the leaked callback context, reclaimed in `stop_frame_timer`.
+    frame_timer_id: Cell<u32>,
+    frame_timer_ctx: Cell<*mut FrameTimerCtx>,
+
     #[cfg(feature = "opengl")]
     pub gl_context: core::cell::OnceCell<GlContext>,
+}
+
+impl Drop for WindowState {
+    fn drop(&mut self) {
+        // Safety net for the normal `before_destroy` teardown; both are
+        // idempotent. The winmm timer lives on its own thread (not tied
+        // to the HWND), so it must be killed explicitly before the
+        // context it references is freed.
+        self.stop_frame_timer();
+    }
 }
 
 impl WindowState {
@@ -567,8 +646,58 @@ impl WindowState {
 
             deferred_tasks: RefCell::new(VecDeque::with_capacity(4)),
 
+            frame_pending: Arc::new(AtomicBool::new(false)),
+            frame_timer_id: Cell::new(0),
+            frame_timer_ctx: Cell::new(null_mut()),
+
             #[cfg(feature = "opengl")]
             gl_context: core::cell::OnceCell::new(),
+        }
+    }
+
+    /// Start driving `on_frame` from a multimedia timer that posts
+    /// [`BV_FRAME_TICK`] every [`FRAME_INTERVAL_MS`]. `uResolution = 1`
+    /// asks winmm to raise the system timer resolution for the timer's
+    /// lifetime so the interval is honoured instead of rounding up to
+    /// the ~15.6 ms default tick. Falls back to a `WM_TIMER` if the
+    /// multimedia timer can't be created.
+    fn start_frame_timer(&self) {
+        let ctx = Box::into_raw(Box::new(FrameTimerCtx {
+            hwnd: self.hwnd,
+            pending: self.frame_pending.clone(),
+        }));
+        let id = unsafe {
+            timeSetEvent(
+                FRAME_INTERVAL_MS,
+                1,
+                Some(frame_timer_callback),
+                ctx as usize,
+                TIME_PERIODIC | TIME_CALLBACK_FUNCTION | TIME_KILL_SYNCHRONOUS,
+            )
+        };
+        if id == 0 {
+            // The timer never took ownership of the context; reclaim it
+            // and fall back to a low-resolution `WM_TIMER`.
+            drop(unsafe { Box::from_raw(ctx) });
+            unsafe { SetTimer(self.hwnd, WIN_FRAME_TIMER, FRAME_INTERVAL_MS, None) };
+            return;
+        }
+        self.frame_timer_id.set(id);
+        self.frame_timer_ctx.set(ctx);
+    }
+
+    /// Stop the frame timer and free its callback context. Idempotent.
+    /// `TIME_KILL_SYNCHRONOUS` (set at creation) makes `timeKillEvent`
+    /// block until any in-flight callback returns, so the context is
+    /// safe to free afterwards.
+    fn stop_frame_timer(&self) {
+        let id = self.frame_timer_id.replace(0);
+        if id != 0 {
+            unsafe { timeKillEvent(id) };
+        }
+        let ctx = self.frame_timer_ctx.replace(null_mut());
+        if !ctx.is_null() {
+            drop(unsafe { Box::from_raw(ctx) });
         }
     }
 
@@ -781,12 +910,10 @@ impl Window<'_> {
         )
         .unwrap();
 
-        // FIXME: this SetTimer call could be in after_create, but for some reason it changes the ordering
-        // for a parent+child window situation, which results in the parent drawing over the child.
-        // This timer should be replaced by proper window redrawing/damage/vsync handling, but this
-        // would be a breaking change, so we'll do that later.
-        unsafe { SetTimer(hwnd, WIN_FRAME_TIMER, 15, None) };
-
+        // The frame timer is started in `after_create` (see
+        // `WindowState::start_frame_timer`); its first tick fires after
+        // one interval, so the `WM_SHOWWINDOW` posted below is handled
+        // first and the child window paints in the right order.
         unsafe { PostMessageW(hwnd, WM_SHOWWINDOW, 0, 0) };
 
         WindowHandle { hwnd: Some(hwnd), is_open: Rc::clone(&is_open) }
