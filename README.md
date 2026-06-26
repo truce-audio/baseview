@@ -10,6 +10,7 @@ This is a fork of [RustAudio/baseview](https://github.com/RustAudio/baseview) (p
 - **Host-driven NSView resize → `Resized` events** on macOS — see [macOS frame-change Resized events](#macos-frame-change-resized-events).
 - **`Window::set_mouse_cursor` for macOS** — upstream is `todo!()`, see [macOS cursor implementation](#macos-cursor-implementation).
 - **`hit_test` gated behind `opengl` cfg** so CPU-only renderers (wgpu via `CAMetalLayer`, CoreGraphics blit) get AppKit's default hit-testing back — see [CPU-only hit-test gate](#cpu-only-hit-test-gate).
+- **Windows frame pacing via a multimedia timer** on Windows — replaces the low-priority, coalescing `WM_TIMER` that drove `on_frame` with a non-coalescing posted-message timer, fixing slow / bursty editor repaints inside busy DAWs, plus a re-entrancy guard so a render that pumps the message queue can't abort the host — see [Windows frame pacing](#windows-frame-pacing).
 
 > **Note:** This package is a temporary fork intended to live only until these patches are merged upstream into [RustAudio/baseview](https://github.com/RustAudio/baseview). Once upstream carries the fixes, switch back to the canonical crate — there is nothing here that should outlive that merge.
 
@@ -84,6 +85,35 @@ The implementation also handles dynamic cursor updates: AppKit's cursor only sti
 Upstream baseview's `-[NSView hitTest:]` override always runs, even when the consumer isn't using the OpenGL render path. That override exists to redirect hit-tests away from a GL render subview so input events land on baseview's main view; with no GL subview present it has nothing to redirect and can leave events unhandled (cursor reverts to the host's last-set cursor, drags don't start cleanly).
 
 This fork gates the `hitTest:` method registration behind `#[cfg(feature = "opengl")]`. Consumers using baseview purely for windowing + CPU rendering (truce-gui via wgpu / CoreGraphics, anyone painting through `setContents:`) get AppKit's default hit-testing back, which behaves correctly for top-level NSViews.
+
+## Windows frame pacing
+
+Upstream baseview on Windows drives `WindowHandler::on_frame` from a 15 ms `WM_TIMER` (`src/win/window.rs`). The upstream code even flags this as a placeholder ("should be replaced by proper window redrawing/damage/vsync handling"). For a plugin editor embedded as a `WS_CHILD` of a busy DAW it produces visibly **slow and bursty** repaints, and every wgpu/GL backend (egui, iced, …) inherits it because they all render from `on_frame`.
+
+### Why `WM_TIMER` is the wrong driver
+
+`WM_TIMER` is the lowest-priority Windows message:
+
+- **It only fires when the queue is otherwise empty.** A DAW floods its GUI thread with messages (automation, meters, mouse), so the editor's timer starves, then catches up in a clump — frames arrive in bursts instead of evenly.
+- **Missed intervals coalesce.** Windows posts at most one `WM_TIMER` no matter how many intervals elapsed, so a stall is never made up.
+- **Resolution is ~15.6 ms.** A 15 ms request rounds up to the next system tick; under coalescing the effective rate often drops to ~31 ms (~32 fps), the "slow" half of the symptom.
+
+### The fix
+
+`src/win/window.rs` replaces the `WM_TIMER` with a **winmm multimedia timer** (`timeSetEvent`, `TIME_PERIODIC`) whose callback *posts* a custom `BV_FRAME_TICK` message:
+
+- A **posted** message is delivered at normal priority and is never coalesced, so frames keep a steady cadence even under a saturated message pump.
+- `uResolution = 1` raises the system timer resolution for the timer's lifetime, so the 15 ms interval is honoured instead of rounding up to the default tick.
+- A shared `frame_pending` `AtomicBool` gates the callback so at most **one** frame is ever queued: a stalled pump coalesces to a single catch-up frame rather than a backlog that floods the queue and repaints in a burst.
+- Lifecycle: the timer starts in `after_create` (its first tick fires ~one interval later, so the `WM_SHOWWINDOW` posted by `open` is handled first and the child window paints in the right order) and is torn down in `before_destroy`, with a `Drop` on `WindowState` as a safety net. `TIME_KILL_SYNCHRONOUS` guarantees no callback is in flight before the callback context is freed. If `timeSetEvent` ever fails the code falls back to the original `WM_TIMER`, so the editor can never end up with no frame source.
+
+Enabling the API only adds the `Win32_Media` feature to the existing `windows-sys` dependency.
+
+### Re-entrancy guard
+
+Delivering frames reliably surfaced a latent crash: on Windows a wgpu/DXGI `Present` inside `on_frame` can pump the message queue, dispatching a queued `BV_FRAME_TICK` **re-entrantly** while the handler is still borrowed. `handle_on_frame` / `handle_event` did an unconditional `RefCell::borrow_mut`, so the nested call panicked, and since the window proc is `extern "system"` (no `catch_unwind`) the panic unwound across the FFI boundary and aborted the host (`STATUS_FATAL_APP_EXIT`, `0x40000015`). The lazy `WM_TIMER` almost never had a tick queued at that instant, so the bug stayed hidden until frames were posted reliably.
+
+Both entry points now use `try_borrow_mut` and skip the re-entrant call (the next tick renders normally; a re-entrant event is reported `Ignored`) instead of panicking.
 
 ## Release scripts
 

@@ -702,7 +702,13 @@ impl WindowState {
     }
 
     pub(crate) fn handle_on_frame(&self) {
-        let mut handler = self.handler.borrow_mut();
+        // A render can re-enter the Windows message loop (a wgpu/DXGI
+        // `Present` pumps queued messages), dispatching another posted
+        // frame tick while `handler` is still borrowed here. Skip the
+        // nested frame rather than double-borrow: a `borrow_mut` panic
+        // unwinding across the `extern "system"` window proc aborts the
+        // host. The next tick renders normally.
+        let Ok(mut handler) = self.handler.try_borrow_mut() else { return };
         let Some(handler) = handler.as_mut() else { return };
         let mut window = crate::window::Window::new(Window { state: self });
 
@@ -710,7 +716,12 @@ impl WindowState {
     }
 
     pub(crate) fn handle_event(&self, event: Event) -> EventStatus {
-        let mut handler = self.handler.borrow_mut();
+        // See `handle_on_frame`: an event re-entering while `handler` is
+        // borrowed (e.g. a message pumped mid-render) must not panic
+        // across the FFI boundary. Report it ignored instead.
+        let Ok(mut handler) = self.handler.try_borrow_mut() else {
+            return EventStatus::Ignored;
+        };
 
         let Some(handler) = handler.as_mut() else {
             return EventStatus::Ignored;
