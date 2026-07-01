@@ -1,8 +1,9 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::ffi::c_void;
+use std::mem::ManuallyDrop;
 use std::ptr;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use keyboard_types::KeyboardEvent;
 use objc2::rc::{autoreleasepool, Retained};
@@ -96,11 +97,18 @@ impl WindowInner {
 
                 let window_state = Rc::from_raw(state_ptr as *mut WindowState);
 
-                // Cancel the frame timer
+                // Cancel the frame timer. `invalidate` removes it from
+                // whichever run loop it was scheduled on (not necessarily
+                // the current one), so no stray tick can fire after the
+                // state is dropped below. Then reclaim the `Weak` the
+                // timer context borrowed - safe now that the timer is
+                // dead and can no longer touch it.
                 if let Some(frame_timer) = window_state.frame_timer.take() {
-                    if let Some(run_loop) = CFRunLoop::current() {
-                        run_loop.remove_timer(Some(&frame_timer), kCFRunLoopDefaultMode);
-                    }
+                    frame_timer.invalidate();
+                }
+                let weak_ptr = window_state.timer_weak.replace(ptr::null());
+                if !weak_ptr.is_null() {
+                    drop(Weak::from_raw(weak_ptr));
                 }
 
                 // Deregister NSView from NotificationCenter.
@@ -311,6 +319,7 @@ impl<'a> Window<'a> {
             window_handler: RefCell::new(window_handler),
             keyboard_state: KeyboardState::new(),
             frame_timer: RetainedCell::empty(),
+            timer_weak: Cell::new(ptr::null()),
             window_info: Cell::new(window_info),
             deferred_events: RefCell::default(),
         });
@@ -329,7 +338,7 @@ impl<'a> Window<'a> {
                 .load_ptr::<*const c_void>(&ns_view)
                 .write(window_state_ptr as *const c_void);
 
-            WindowState::setup_timer(window_state_ptr);
+            WindowState::setup_timer(&window_state);
         }
 
         WindowHandle { state: window_state }
@@ -418,6 +427,9 @@ pub(super) struct WindowState {
     window_handler: RefCell<Box<dyn WindowHandler>>,
     keyboard_state: KeyboardState,
     frame_timer: RetainedCell<CFRunLoopTimer>,
+    /// Raw `Weak<WindowState>` handed to the frame timer's context. Kept
+    /// so teardown can reclaim and drop it after the timer is invalidated.
+    timer_weak: Cell<*const WindowState>,
     /// The last known window info for this window.
     pub window_info: Cell<WindowInfo>,
 
@@ -488,13 +500,18 @@ impl WindowState {
         self.keyboard_state.process_native_event(event)
     }
 
-    unsafe fn setup_timer(window_state_ptr: *const WindowState) {
+    unsafe fn setup_timer(window_state: &Rc<WindowState>) {
         unsafe extern "C-unwind" fn timer_callback(
-            _: *mut CFRunLoopTimer, window_state_ptr: *mut c_void,
+            _: *mut CFRunLoopTimer, weak_ptr: *mut c_void,
         ) {
-            unsafe {
-                let window_state = &*(window_state_ptr as *const WindowState);
-
+            // `weak_ptr` is a `Weak<WindowState>` (from `Weak::into_raw`),
+            // borrowed without taking ownership - it's freed only at
+            // teardown. A host can release the editor view without a clean
+            // `close()`, leaving this timer scheduled after the state is
+            // gone; upgrading a `Weak` skips the frame instead of
+            // dereferencing freed memory.
+            let weak = ManuallyDrop::new(unsafe { Weak::from_raw(weak_ptr as *const WindowState) });
+            if let Some(window_state) = weak.upgrade() {
                 window_state.trigger_frame();
             }
         }
@@ -503,9 +520,14 @@ impl WindowState {
             return;
         };
 
+        // Non-owning handle for the timer context. Stored on the state so
+        // teardown can reclaim and drop it once the timer is invalidated.
+        let weak_ptr = Weak::into_raw(Rc::downgrade(window_state));
+        window_state.timer_weak.set(weak_ptr);
+
         let mut timer_context = CFRunLoopTimerContext {
             version: 0,
-            info: window_state_ptr as *mut c_void,
+            info: weak_ptr as *mut c_void,
             retain: None,
             release: None,
             copyDescription: None,
@@ -520,12 +542,15 @@ impl WindowState {
             Some(timer_callback),
             &mut timer_context,
         ) else {
+            // Reclaim the `Weak` we handed to the (never-created) timer.
+            window_state.timer_weak.set(ptr::null());
+            drop(unsafe { Weak::from_raw(weak_ptr) });
             return;
         };
 
         current_loop.add_timer(Some(&timer), kCFRunLoopDefaultMode);
 
-        (*window_state_ptr).frame_timer.set(timer.into());
+        window_state.frame_timer.set(timer.into());
     }
 
     fn send_deferred_events(&self, window_handler: &mut dyn WindowHandler) {

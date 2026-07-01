@@ -7,6 +7,7 @@ A low-level windowing system geared towards making audio plugin UIs.
 This is a fork of [RustAudio/baseview](https://github.com/RustAudio/baseview) (published on crates.io as `baseview-truce`) carrying patches that haven't yet made it into the upstream crate:
 
 - **Pro Tools (AAX) teardown crash fix** on macOS — see [Pro Tools (AAX) fix](#pro-tools-aax-fix).
+- **Editor frame-timer use-after-free fix** on macOS: the repaint timer could fire after the `WindowState` was freed (AU v3 view-service teardown), segfaulting the editor. See [macOS editor frame-timer fix](#macos-editor-frame-timer-fix).
 - **Host-driven NSView resize → `Resized` events** on macOS — see [macOS frame-change Resized events](#macos-frame-change-resized-events).
 - **`Window::set_mouse_cursor` for macOS** — upstream is `todo!()`, see [macOS cursor implementation](#macos-cursor-implementation).
 - **`hit_test` gated behind `opengl` cfg** so CPU-only renderers (wgpu via `CAMetalLayer`, CoreGraphics blit) get AppKit's default hit-testing back — see [CPU-only hit-test gate](#cpu-only-hit-test-gate).
@@ -59,6 +60,35 @@ Pro Tools' `DFW_NSContainer` — the container view Pro Tools wraps around the p
 4. `[view.layer setContents: nil]` to drop the layer's image.
 
 That's the whole patch — about 35 added lines in a single file. See the `git diff` vs upstream master.
+
+## macOS editor frame-timer fix
+
+On macOS baseview drives `WindowHandler::on_frame` from a 15 ms `CFRunLoopTimer`. In an AU v3 view-service (Logic, and any AUv3 host that runs the editor in a separate view process) the plugin editor could segfault when its window was opened or closed. Because the crash lives in the editor's paint timer, an audio-only validation like `auval` never reaches it; it only fires once a host actually shows the UI.
+
+### Crash signature
+
+```
+EXC_BAD_ACCESS (SIGSEGV), KERN_INVALID_ADDRESS at 0x0000000000000018
+0  <Plugin>AU        baseview::macos::window::WindowState::setup_timer::timer_callback
+1  CoreFoundation    __CFRUNLOOP_IS_CALLING_OUT_TO_A_TIMER_CALLBACK_FUNCTION__
+2  CoreFoundation    __CFRunLoopDoTimer
+3  CoreFoundation    __CFRunLoopRun
+```
+
+The fault address is a small fixed offset (`0x18`, a field within `WindowState`) off a null/freed base: the timer callback dereferencing a `WindowState` that no longer exists.
+
+### Root cause
+
+`setup_timer` stored a non-owning raw `*const WindowState` in the `CFRunLoopTimerContext` (`retain` / `release` are `None`), so the timer did not keep the state alive. Teardown then cancelled the timer with `CFRunLoop::current().remove_timer(...)`, but that targets whichever run loop is *current at close time*, which in an AU view-service is not guaranteed to be the loop `setup_timer` scheduled the timer on. When they differ the removal silently no-ops, the `WindowState` is dropped anyway, and the next 15 ms tick dereferences freed memory. The callback had no liveness check, so a surviving timer was fatal.
+
+### The fix
+
+`src/macos/window.rs`, two changes:
+
+1. **Weak handle in the timer context.** The context now holds a `Weak<WindowState>` (via `Weak::into_raw`) instead of a raw pointer. `timer_callback` upgrades it and skips the frame if the state is gone, so a stray tick after teardown is a harmless no-op instead of a use-after-free. The `Weak` is stored on the `WindowState` and reclaimed / dropped at close.
+2. **Loop-agnostic cancellation.** Teardown calls `CFRunLoopTimer::invalidate()` instead of `remove_timer` on the current loop. `invalidate` removes the timer from whatever loop it was scheduled on, so no tick can outlive the drop regardless of which run loop closes the window.
+
+This is the same "editor close crash" family as the [Pro Tools (AAX) fix](#pro-tools-aax-fix) but a different object: there it is AppKit registries retaining a freed view; here it is the frame timer outliving the window state.
 
 ## macOS frame-change Resized events
 
