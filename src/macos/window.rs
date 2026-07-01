@@ -501,9 +501,7 @@ impl WindowState {
     }
 
     unsafe fn setup_timer(window_state: &Rc<WindowState>) {
-        unsafe extern "C-unwind" fn timer_callback(
-            _: *mut CFRunLoopTimer, weak_ptr: *mut c_void,
-        ) {
+        unsafe extern "C-unwind" fn timer_callback(_: *mut CFRunLoopTimer, weak_ptr: *mut c_void) {
             // `weak_ptr` is a `Weak<WindowState>` (from `Weak::into_raw`),
             // borrowed without taking ownership - it's freed only at
             // teardown. A host can release the editor view without a clean
