@@ -1,5 +1,16 @@
 [package]
-name = "baseview-truce"
+# This branch exists so a downstream `[patch."https://github.com/vizia/baseview.git"]`
+# entry can substitute this crate in for vizia's pinned baseview rev
+# without the cross-rename that cargo refuses to apply. cargo's
+# `[patch]` machinery matches the replacement by the *consumer's*
+# requested package name - vizia asks for `baseview`, so the patch
+# package must literally be named `baseview`. The crates.io-published
+# fork is `baseview-truce` for namespace reasons; this branch carries
+# the same source under the unrenamed name so the substitution can
+# match. Don't publish this branch to crates.io (the `baseview` name
+# is already taken). Keep this branch as master + this single commit so
+# updates are a trivial rebase.
+name = "baseview"
 version = "0.1.1-truce.13"
 authors = [
     "Mahae Koh <mahae@truce.audio>",
