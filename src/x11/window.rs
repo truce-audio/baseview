@@ -98,7 +98,13 @@ pub(crate) struct WindowInner {
     gl_context: Option<GlContext>,
 
     pub(crate) xcb_connection: Rc<XcbConnection>,
-    window_id: XWindow,
+    pub(crate) window_id: XWindow,
+    /// The host-supplied parent window when this window is embedded
+    /// (`open_parented`). Some DAWs (Bitwig on Linux) resize the embed
+    /// parent directly instead of driving the plugin's resize API, so we
+    /// watch its `ConfigureNotify` and size our child to fill it. `None`
+    /// for top-level windows (parented to the root).
+    pub(crate) embed_parent_id: Option<XWindow>,
     pub(crate) window_info: WindowInfo,
     visual_id: Visualid,
     mouse_cursor: Cell<MouseCursor>,
@@ -271,9 +277,25 @@ impl<'a> Window<'a> {
             GlContext::new(context)
         });
 
+        // Watch the embed parent for size changes: some hosts (Bitwig on
+        // Linux) resize the parent embed window directly rather than
+        // calling the plugin's resize API, and X11 does not auto-resize
+        // children. Selecting `STRUCTURE_NOTIFY` on the parent lets the
+        // event loop mirror the parent's size onto our child. Best-effort:
+        // ignore failures (e.g. a parent we may not select on).
+        let embed_parent_id = parent;
+        if let Some(pid) = embed_parent_id {
+            let _ = xcb_connection.conn.change_window_attributes(
+                pid,
+                &ChangeWindowAttributesAux::new().event_mask(EventMask::STRUCTURE_NOTIFY),
+            );
+            let _ = xcb_connection.conn.flush();
+        }
+
         let mut inner = WindowInner {
             xcb_connection,
             window_id,
+            embed_parent_id,
             window_info,
             visual_id: visual_info.visual_id,
             mouse_cursor: Cell::new(MouseCursor::default()),

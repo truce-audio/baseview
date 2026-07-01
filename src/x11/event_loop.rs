@@ -9,6 +9,7 @@ use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event as XEvent;
+use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt as _};
 
 pub(super) struct EventLoop {
     handler: Box<dyn WindowHandler>,
@@ -156,6 +157,25 @@ impl EventLoop {
             }
 
             XEvent::ConfigureNotify(event) => {
+                // The embed parent was resized (Bitwig on Linux resizes the
+                // parent directly rather than calling the plugin's resize
+                // API). X11 does not auto-resize children, so mirror the
+                // parent's new size onto our child; the child's own
+                // ConfigureNotify (below) then drives the resize event.
+                if Some(event.window) == self.window.embed_parent_id {
+                    let pw = event.width as u32;
+                    let ph = event.height as u32;
+                    let cur = self.window.window_info.physical_size();
+                    if pw > 0 && ph > 0 && (pw != cur.width || ph != cur.height) {
+                        let _ = self.window.xcb_connection.conn.configure_window(
+                            self.window.window_id,
+                            &ConfigureWindowAux::new().width(pw).height(ph),
+                        );
+                        let _ = self.window.xcb_connection.conn.flush();
+                    }
+                    return;
+                }
+
                 let new_physical_size = PhySize::new(event.width as u32, event.height as u32);
 
                 if self.new_physical_size.is_some()
