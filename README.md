@@ -11,6 +11,7 @@ This is a fork of [RustAudio/baseview](https://github.com/RustAudio/baseview) (p
 - **`Window::set_mouse_cursor` for macOS** — upstream is `todo!()`, see [macOS cursor implementation](#macos-cursor-implementation).
 - **`hit_test` gated behind `opengl` cfg** so CPU-only renderers (wgpu via `CAMetalLayer`, CoreGraphics blit) get AppKit's default hit-testing back — see [CPU-only hit-test gate](#cpu-only-hit-test-gate).
 - **Windows frame pacing via a multimedia timer** on Windows — replaces the low-priority, coalescing `WM_TIMER` that drove `on_frame` with a non-coalescing posted-message timer, fixing slow / bursty editor repaints inside busy DAWs, plus a re-entrancy guard so a render that pumps the message queue can't abort the host — see [Windows frame pacing](#windows-frame-pacing).
+- **Embed-parent resize tracking** on Linux/X11 — mirrors the host embed window's size onto the child so editors follow a host-driven resize even when the DAW resizes the parent directly instead of calling the plugin resize API (Bitwig) — see [Linux embed-parent resize](#linux-embed-parent-resize).
 
 > **Note:** This package is a temporary fork intended to live only until these patches are merged upstream into [RustAudio/baseview](https://github.com/RustAudio/baseview). Once upstream carries the fixes, switch back to the canonical crate — there is nothing here that should outlive that merge.
 
@@ -114,6 +115,19 @@ Enabling the API only adds the `Win32_Media` feature to the existing `windows-sy
 Delivering frames reliably surfaced a latent crash: on Windows a wgpu/DXGI `Present` inside `on_frame` can pump the message queue, dispatching a queued `BV_FRAME_TICK` **re-entrantly** while the handler is still borrowed. `handle_on_frame` / `handle_event` did an unconditional `RefCell::borrow_mut`, so the nested call panicked, and since the window proc is `extern "system"` (no `catch_unwind`) the panic unwound across the FFI boundary and aborted the host (`STATUS_FATAL_APP_EXIT`, `0x40000015`). The lazy `WM_TIMER` almost never had a tick queued at that instant, so the bug stayed hidden until frames were posted reliably.
 
 Both entry points now use `try_borrow_mut` and skip the re-entrant call (the next tick renders normally; a re-entrant event is reported `Ignored`) instead of panicking.
+
+## Linux embed-parent resize
+
+Upstream baseview on X11 only resizes its window from `Window::resize` (the plugin's own request) or a `ConfigureNotify` on that window. When a plugin editor is embedded, X11 does **not** auto-resize a child when its parent changes size, so the child only tracks the host if the host explicitly drives the plugin's resize API (CLAP `gui.set_size`, VST3 `onSize`), which then calls `Window::resize`.
+
+Bitwig on Linux breaks that assumption: during an interactive resize it grows its **embed parent window directly** and never calls the plugin's resize API with the new size (it only echoes the current size). The plugin's child window stays at its original size, the render surface stays small, and the uncovered part of the enlarged embed shows as a black margin until the window is moved (which makes Bitwig re-sync the child). Because the gap is below the GUI layer, it hits every backend (egui, iced, slint, vizia) and both plugin formats.
+
+The fix, entirely in `src/x11/`:
+
+- On `open_parented`, select `STRUCTURE_NOTIFY` on the host-supplied embed parent (stored as `WindowInner::embed_parent_id`; `None` for top-level windows parented to the root, so nothing changes there).
+- In the event loop, a `ConfigureNotify` for the embed parent mirrors the parent's new size onto the child via `configure_window`. The child's own `ConfigureNotify` then flows through the existing path, emitting `WindowEvent::Resized` so backends reconfigure their surfaces exactly as they do for any other resize.
+
+This is X11-only and no-ops for non-embedded windows, so macOS / Windows and standalone top-level windows are unaffected.
 
 ## Release scripts
 
