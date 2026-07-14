@@ -954,6 +954,11 @@ impl Window<'_> {
         self.state.deferred_tasks.borrow_mut().push_back(task);
     }
 
+    /// See the X11 implementation. On Windows the per-window DPI is driven by
+    /// the OS (`WM_DPICHANGED` / `GetDpiForWindow`) rather than a host content
+    /// scale reported after attach, so this is a no-op here.
+    pub fn set_scale_factor(&mut self, _scale: f64) {}
+
     pub fn set_mouse_cursor(&mut self, mouse_cursor: MouseCursor) {
         self.state.cursor_icon.set(mouse_cursor);
         unsafe {
