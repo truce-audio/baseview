@@ -397,6 +397,11 @@ impl<'a> Window<'a> {
         }
     }
 
+    /// See the X11 implementation. On macOS the Retina backing scale is driven
+    /// by AppKit through the parent `NSView`/`NSWindow`, not by a host content
+    /// scale reported after attach, so this is a no-op here.
+    pub fn set_scale_factor(&mut self, _scale: f64) {}
+
     pub fn set_mouse_cursor(&mut self, mouse_cursor: MouseCursor) {
         unsafe { super::cursor::set_cursor(mouse_cursor) };
     }

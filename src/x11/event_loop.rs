@@ -47,9 +47,19 @@ impl EventLoop {
             self.handle_xcb_event(event);
         }
 
-        if let Some(size) = self.new_physical_size.take() {
-            self.window.window_info =
-                WindowInfo::from_physical_size(size, self.window.window_info.scale());
+        // A `set_scale_factor` call stashes the new content scale here; apply
+        // it to whatever physical size the coalesced `ConfigureNotify`s settled
+        // on (or, if the physical size didn't change, the current one) so the
+        // logical size and reported scale reflect the host's new factor.
+        let pending_scale = self.window.pending_scale.take();
+        if self.new_physical_size.is_some() || pending_scale.is_some() {
+            let size = self
+                .new_physical_size
+                .take()
+                .unwrap_or_else(|| self.window.window_info.physical_size());
+            let scale = pending_scale.unwrap_or_else(|| self.window.window_info.scale());
+
+            self.window.window_info = WindowInfo::from_physical_size(size, scale);
 
             let window_info = self.window.window_info;
 

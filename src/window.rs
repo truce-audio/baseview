@@ -98,6 +98,20 @@ impl<'a> Window<'a> {
         self.window.resize(size);
     }
 
+    /// Re-interpret the window at a new content-scale factor, holding the
+    /// logical size constant and growing/shrinking the physical size to match.
+    ///
+    /// This is for embedded plug-in views whose scale becomes known only after
+    /// the window is attached (the `WindowScalePolicy` chosen at open is
+    /// otherwise fixed for the window's lifetime). Implemented on X11, where a
+    /// host may report its content scale late via
+    /// `IPlugViewContentScaleSupport`; a no-op on Windows and macOS, which
+    /// drive DPI through the OS. The change is applied on the next event-loop
+    /// iteration and reported to the handler via a `Resized` event.
+    pub fn set_scale_factor(&mut self, scale: f64) {
+        self.window.set_scale_factor(scale);
+    }
+
     pub fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
         self.window.set_mouse_cursor(cursor);
     }

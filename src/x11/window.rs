@@ -110,6 +110,13 @@ pub(crate) struct WindowInner {
     mouse_cursor: Cell<MouseCursor>,
 
     pub(crate) close_requested: Cell<bool>,
+
+    /// New content-scale factor requested via [`Window::set_scale_factor`]
+    /// since the last event-loop drain. Set from the handler (which only holds
+    /// a shared `&WindowInner`), consumed by the event loop when it applies the
+    /// resulting `ConfigureNotify` so the new physical size is converted to
+    /// logical at the new scale rather than the stale creation-time scale.
+    pub(crate) pending_scale: Cell<Option<f64>>,
 }
 
 pub struct Window<'a> {
@@ -302,6 +309,8 @@ impl<'a> Window<'a> {
 
             close_requested: Cell::new(false),
 
+            pending_scale: Cell::new(None),
+
             #[cfg(feature = "opengl")]
             gl_context,
         };
@@ -365,6 +374,37 @@ impl<'a> Window<'a> {
 
         // This will trigger a `ConfigureNotify` event which will in turn change `self.window_info`
         // and notify the window handler about it
+    }
+
+    /// Re-interpret the window at a new content-scale factor.
+    ///
+    /// The *physical* pixel size is left untouched - for an embedded plug-in
+    /// view that is the host's to control (it drives the embed parent, which we
+    /// mirror onto the child) - and only the scale, and hence the derived
+    /// logical size (`physical / scale`) and mouse-coordinate mapping, change.
+    ///
+    /// This exists because `WindowScalePolicy` is fixed at open, yet a host may
+    /// report its content scale only *after* the view is attached (e.g. REAPER
+    /// on Linux calling `IPlugViewContentScaleSupport::setContentScaleFactor`
+    /// after `IPlugView::attached`). Without a way to update it, the child
+    /// stays at the creation-time scale: it renders 1x content in a 2x frame
+    /// and mouse coordinates are divided by the stale factor.
+    ///
+    /// The change is applied by the event loop on its next drain, which then
+    /// notifies the handler with a `Resized` carrying the new scale. A
+    /// non-finite or non-positive `scale`, or one equal to the current scale,
+    /// is a no-op.
+    pub fn set_scale_factor(&mut self, scale: f64) {
+        let cur = self.inner.window_info.scale();
+        if !scale.is_finite() || scale <= 0.0 || (scale - cur).abs() < f64::EPSILON {
+            return;
+        }
+        // We only hold a shared `&WindowInner` here, so we can't rewrite
+        // `window_info` directly. Stash the new scale; the event loop applies
+        // it against the current physical size on its next drain and emits the
+        // `Resized`. Do NOT resize the child - re-scaling must not fight the
+        // host's own sizing of the embed parent.
+        self.inner.pending_scale.set(Some(scale));
     }
 
     #[cfg(feature = "opengl")]
