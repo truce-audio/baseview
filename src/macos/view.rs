@@ -6,10 +6,10 @@ use objc2::rc::Allocated;
 use objc2::runtime::{
     AnyClass, AnyObject, Bool, ClassBuilder, NSObjectProtocol, ProtocolObject, Sel,
 };
-use objc2::{msg_send, sel, AllocAnyThread, ClassType};
+use objc2::{msg_send, sel, AllocAnyThread, ClassType, MainThreadMarker, Message};
 use objc2_app_kit::{
-    NSDragOperation, NSDraggingInfo, NSEvent, NSFilenamesPboardType, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidBecomeKeyNotification,
+    NSApplication, NSDragOperation, NSDraggingInfo, NSEvent, NSEventType, NSFilenamesPboardType,
+    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidBecomeKeyNotification,
     NSWindowDidResignKeyNotification,
 };
 use objc2_core_foundation::CFUUID;
@@ -62,20 +62,26 @@ macro_rules! add_mouse_button_class_method {
 }
 
 macro_rules! add_simple_keyboard_class_method {
-    ($class:ident, $sel:ident) => {
+    ($class:ident, $sel:ident, $forward:expr) => {
         #[allow(non_snake_case)]
-        extern "C-unwind" fn $sel(this: &NSView, _: Sel, event: &NSEvent){
+        extern "C-unwind" fn $sel(this: &NSView, _: Sel, event: &NSEvent) {
             let state = unsafe { WindowState::from_view(this) };
-
-            if let Some(key_event) = state.process_native_key_event(event){
-                let status = state.trigger_event(Event::Keyboard(key_event));
-
-                if let EventStatus::Ignored = status {
-                    unsafe {
-                        let superclass = msg_send![this, superclass];
-
-                        let () = msg_send![super(this, superclass), $sel:event];
-                    }
+            let forward = $forward;
+            let ignored = match state.process_native_key_event(event) {
+                Some(key_event) => {
+                    matches!(state.trigger_event(Event::Keyboard(key_event)), EventStatus::Ignored)
+                }
+                None => forward,
+            };
+            if !ignored {
+                return;
+            }
+            if forward {
+                forward_unused_key(this, event, state.owns_window());
+            } else {
+                unsafe {
+                    let superclass = msg_send![this, superclass];
+                    let () = msg_send![super(this, superclass), $sel:event];
                 }
             }
         }
@@ -252,9 +258,9 @@ unsafe fn create_view_class() -> &'static AnyClass {
         add_simple_mouse_class_method!(class, mouseEntered, MouseEvent::CursorEntered);
         add_simple_mouse_class_method!(class, mouseExited, MouseEvent::CursorLeft);
 
-        add_simple_keyboard_class_method!(class, keyDown);
-        add_simple_keyboard_class_method!(class, keyUp);
-        add_simple_keyboard_class_method!(class, flagsChanged);
+        add_simple_keyboard_class_method!(class, keyDown, true);
+        add_simple_keyboard_class_method!(class, keyUp, true);
+        add_simple_keyboard_class_method!(class, flagsChanged, false);
     }
 
     class.add_ivar::<*mut c_void>(BASEVIEW_STATE_IVAR);
@@ -719,4 +725,215 @@ extern "C-unwind" fn handle_notification(this: &NSView, _cmd: Sel, notification:
     } else {
         WindowEvent::Unfocused
     }));
+}
+
+/// Where an unused key goes. Any AppKit host, not one DAW: Logic keeps the
+/// arrange window as `mainWindow` while the plug-in panel is key, and Live
+/// does the same for AU and VST until the plug-in window itself becomes main.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostKeyTarget {
+    /// The document window. `mainWindow` when that is not us, otherwise the
+    /// largest other window that can become main.
+    Document,
+    /// A host view above this one, inside the same window.
+    Responder,
+    /// Nowhere to send it. `NSView`'s `keyDown:` would beep.
+    Drop,
+}
+
+fn host_key_target(
+    standalone: bool,
+    document_is_main: bool,
+    fills_plugin_window: bool,
+    document_behind: bool,
+    host_view_above: bool,
+) -> HostKeyTarget {
+    if standalone {
+        return HostKeyTarget::Drop;
+    }
+    if document_is_main || (fills_plugin_window && document_behind) {
+        return HostKeyTarget::Document;
+    }
+    if host_view_above {
+        return HostKeyTarget::Responder;
+    }
+    HostKeyTarget::Drop
+}
+
+/// Give a key the editor did not use back to the host.
+///
+/// `NSView`'s `keyDown:` runs `interpretKeyEvents:` and then beeps. It does
+/// not reach the document window, which is where Logic and Live handle
+/// Space, Return, and the arrange keys. Standalone owns its window, so an
+/// unused key is dropped instead of forwarded.
+fn forward_unused_key(view: &NSView, event: &NSEvent, standalone: bool) {
+    std::thread_local! {
+        static BUSY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    if BUSY.with(|busy| busy.replace(true)) {
+        return;
+    }
+    struct Clear;
+    impl Drop for Clear {
+        fn drop(&mut self) {
+            BUSY.with(|busy| busy.set(false));
+        }
+    }
+    let _clear = Clear;
+
+    let Some(mtm) = MainThreadMarker::new() else { return };
+    let app = NSApplication::sharedApplication(mtm);
+    let ours = view.window();
+    let main = app.mainWindow();
+    let document_is_main = match (&ours, &main) {
+        (Some(ours), Some(main)) => ours.windowNumber() != main.windowNumber(),
+        _ => false,
+    };
+    let fills = fills_its_window(view);
+    // The document is already `mainWindow` in the usual case. Only look
+    // for the window behind us when the plug-in window itself became main.
+    let behind = if document_is_main {
+        None
+    } else {
+        largest_other_window(&app, ours.as_deref())
+    };
+    let host_view_above = next_is_host_view(view);
+    match host_key_target(standalone, document_is_main, fills, behind.is_some(), host_view_above) {
+        HostKeyTarget::Document => {
+            if document_is_main {
+                if let Some(main) = main {
+                    send_key(&main, event);
+                }
+            } else if let Some(window) = behind {
+                send_key(&window, event);
+            }
+        }
+        HostKeyTarget::Responder => deliver_to_next(view, event),
+        HostKeyTarget::Drop => {}
+    }
+}
+
+/// A plug-in editor fills the window the host made for it. A view embedded
+/// in the arrange window does not, and that key stays in the responder chain.
+fn fills_its_window(view: &NSView) -> bool {
+    let Some(window) = view.window() else { return false };
+    let Some(content) = window.contentView() else { return false };
+    let content = content.bounds().size;
+    let ours = view.bounds().size;
+    content.width > 1.0
+        && content.height > 1.0
+        && ours.width >= content.width * 0.85
+        && ours.height >= content.height * 0.85
+}
+
+fn next_is_host_view(view: &NSView) -> bool {
+    let Some(next) = (unsafe { view.nextResponder() }) else { return false };
+    !next.isKindOfClass(NSWindow::class())
+}
+
+fn deliver_to_next(view: &NSView, event: &NSEvent) {
+    let Some(next) = (unsafe { view.nextResponder() }) else { return };
+    if next.isKindOfClass(NSWindow::class()) {
+        return;
+    }
+    unsafe {
+        if event.r#type() == NSEventType::KeyUp {
+            let () = msg_send![&*next, keyUp: event];
+        } else {
+            let () = msg_send![&*next, keyDown: event];
+        }
+    }
+}
+
+/// Largest other visible window that can become main. When the plug-in
+/// window itself is main, that is the document behind it.
+fn largest_other_window(app: &NSApplication, ours: Option<&NSWindow>) -> Option<Retained<NSWindow>> {
+    let skip = ours.map(|window| window.windowNumber());
+    let ordered: Retained<NSArray<NSWindow>> = unsafe { msg_send![app, orderedWindows] };
+    let mut best: Option<Retained<NSWindow>> = None;
+    let mut best_area = 0.0;
+    for window in ordered.iter() {
+        if skip == Some(window.windowNumber()) {
+            continue;
+        }
+        if !window.isVisible() || window.isMiniaturized() || !window.canBecomeMainWindow() {
+            continue;
+        }
+        if window.parentWindow().is_some() {
+            continue;
+        }
+        let size = window.frame().size;
+        let area = size.width * size.height;
+        if area > best_area {
+            best_area = area;
+            best = Some(window.retain());
+        }
+    }
+    best
+}
+
+fn send_key(window: &NSWindow, event: &NSEvent) {
+    let chars = event.characters().unwrap_or_else(|| NSString::from_str(""));
+    let raw = event.charactersIgnoringModifiers().unwrap_or_else(|| NSString::from_str(""));
+    let Some(copy) = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+        event.r#type(),
+        NSPoint::ZERO,
+        event.modifierFlags(),
+        event.timestamp(),
+        window.windowNumber(),
+        None,
+        &chars,
+        &raw,
+        event.isARepeat(),
+        event.keyCode(),
+    ) else {
+        window.sendEvent(event);
+        return;
+    };
+    window.sendEvent(&copy);
+}
+
+#[cfg(test)]
+mod host_key_tests {
+    use super::{host_key_target, HostKeyTarget};
+
+    #[test]
+    fn document_window_gets_the_key_when_it_stays_main() {
+        assert_eq!(
+            host_key_target(false, true, true, true, true),
+            HostKeyTarget::Document
+        );
+    }
+
+    #[test]
+    fn document_behind_a_plugin_window_that_became_main() {
+        assert_eq!(
+            host_key_target(false, false, true, true, true),
+            HostKeyTarget::Document
+        );
+    }
+
+    #[test]
+    fn embedded_editor_stays_in_the_host_view() {
+        assert_eq!(
+            host_key_target(false, false, false, true, true),
+            HostKeyTarget::Responder
+        );
+    }
+
+    #[test]
+    fn standalone_drops_the_key() {
+        assert_eq!(
+            host_key_target(true, true, true, true, true),
+            HostKeyTarget::Drop
+        );
+    }
+
+    #[test]
+    fn nowhere_to_send_drops_the_key() {
+        assert_eq!(
+            host_key_target(false, false, true, false, false),
+            HostKeyTarget::Drop
+        );
+    }
 }

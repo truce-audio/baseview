@@ -15,7 +15,7 @@ use windows_sys::Win32::{
             TRACKMOUSEEVENT,
         },
         WindowsAndMessaging::{
-            AdjustWindowRectEx, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+            AdjustWindowRectEx, DefWindowProcW,             DestroyWindow, DispatchMessageW, GetMessageW, GetParent,
             LoadCursorW, PostMessageW, SetCursor, SetTimer, SetWindowPos, TranslateMessage,
             HTCLIENT, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WHEEL_DELTA, WM_CHAR,
             WM_CLOSE, WM_DPICHANGED, WM_INPUTLANGCHANGE, WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS,
@@ -58,6 +58,24 @@ use super::keyboard::KeyboardState;
 #[cfg(feature = "opengl")]
 use crate::gl::GlContext;
 use crate::wrappers::win32::window::*;
+
+fn is_sys_key(msg: u32) -> bool {
+    matches!(msg, WM_SYSKEYDOWN | WM_SYSKEYUP | WM_SYSCHAR)
+}
+
+/// Top-level window above `hwnd`. A plug-in editor is a child of the host
+/// window; walking parents stops at that top-level window. A standalone
+/// window has no parent, so this returns `hwnd` itself.
+fn host_root(hwnd: HWND) -> HWND {
+    let mut current = hwnd;
+    loop {
+        let parent = unsafe { GetParent(current) };
+        if parent.is_null() {
+            return current;
+        }
+        current = parent;
+    }
+}
 
 #[allow(non_snake_case)]
 fn HIWORD(wparam: WPARAM) -> u16 {
@@ -457,19 +475,46 @@ unsafe fn wnd_proc_inner(
             // Some(0)
             Some(DefWindowProcW(hwnd, msg, wparam, lparam))
         }
-        WM_CHAR | WM_SYSCHAR | WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP
-        | WM_INPUTLANGCHANGE => {
-            let opt_event =
-                window_state.keyboard_state.borrow_mut().process_message(hwnd, msg, wparam, lparam);
-
+        WM_INPUTLANGCHANGE => {
+            let _ = unsafe {
+                window_state.keyboard_state.borrow_mut().process_message(hwnd, msg, wparam, lparam)
+            };
+            Some(0)
+        }
+        WM_CHAR | WM_SYSCHAR | WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP => {
+            let opt_event = unsafe {
+                window_state.keyboard_state.borrow_mut().process_message(hwnd, msg, wparam, lparam)
+            };
+            // `None` is the middle of a key/char sequence. Hold it until the
+            // message that actually produces a key event.
+            let mut forward = false;
+            let ready = opt_event.is_some();
             if let Some(event) = opt_event {
-                window_state.handle_event(Event::Keyboard(event));
+                forward = matches!(
+                    window_state.handle_event(Event::Keyboard(event)),
+                    EventStatus::Ignored
+                );
             }
-
-            if msg != WM_SYSKEYDOWN {
+            if forward {
+                // A hosted window gets a copy on the top-level host window.
+                // Posting, rather than SendMessage, is what Live and Reaper
+                // honour, and it does not re-enter this procedure.
+                // Standalone has no host window: a system key still goes to
+                // DefWindowProc (Alt+F4), a plain key is dropped so it does
+                // not beep.
+                if window_state.forward_unused_key(hwnd, msg, wparam, lparam) {
+                    Some(0)
+                } else if is_sys_key(msg) {
+                    None
+                } else {
+                    Some(0)
+                }
+            } else if !ready {
+                window_state.hold_key(msg, wparam, lparam);
                 Some(0)
             } else {
-                None
+                window_state.drop_held_keys();
+                Some(0)
             }
         }
         WM_SETFOCUS => {
@@ -589,6 +634,11 @@ pub(super) struct WindowState {
     current_size: Cell<PhySize>,
     current_scale_factor: Cell<f64>,
     keyboard_state: RefCell<KeyboardState>,
+    /// Key messages held until the sequence finishes. Windows splits one
+    /// key into `WM_KEYDOWN` plus `WM_CHAR`. The editor's answer arrives
+    /// on the last message, and an ignored sequence is posted to the host
+    /// together.
+    pending_host_keys: RefCell<Vec<(u32, WPARAM, LPARAM)>>,
     mouse_button_counter: Cell<usize>,
     mouse_was_outside_window: Cell<bool>,
     cursor_icon: Cell<MouseCursor>,
@@ -637,6 +687,7 @@ impl WindowState {
             current_scale_factor: scaling.into(),
             current_size: current_size.into(),
             keyboard_state: RefCell::new(KeyboardState::new()),
+            pending_host_keys: RefCell::new(Vec::new()),
             mouse_button_counter: Cell::new(0),
             mouse_was_outside_window: true.into(),
             cursor_icon: Cell::new(MouseCursor::Default),
@@ -699,6 +750,31 @@ impl WindowState {
         if !ctx.is_null() {
             drop(unsafe { Box::from_raw(ctx) });
         }
+    }
+
+    fn hold_key(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) {
+        self.pending_host_keys.borrow_mut().push((msg, wparam, lparam));
+    }
+
+    fn drop_held_keys(&self) {
+        self.pending_host_keys.borrow_mut().clear();
+    }
+
+    /// Post this key, and any messages held from earlier in the same
+    /// sequence, to the top-level host window. `false` when this window
+    /// is that top-level window.
+    fn forward_unused_key(&self, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> bool {
+        let root = host_root(hwnd);
+        let mut pending = self.pending_host_keys.borrow_mut();
+        if root.is_null() || root == hwnd {
+            pending.clear();
+            return false;
+        }
+        for (held_msg, held_w, held_l) in pending.drain(..) {
+            unsafe { PostMessageW(root, held_msg, held_w, held_l) };
+        }
+        unsafe { PostMessageW(root, msg, wparam, lparam) };
+        true
     }
 
     pub(crate) fn handle_on_frame(&self) {

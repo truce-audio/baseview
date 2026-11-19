@@ -116,7 +116,10 @@ unsafe extern "system" fn keyboard_hook_callback(
 }
 
 // check if `msg` is a keyboard message addressed to a window
-// in KeyboardHookState::open_windows, and intercept it if so
+// in KeyboardHookState::open_windows, and intercept it if so.
+// An ignored key is not left in this message: the window procedure
+// posts a copy to the top-level host window, which is not one of ours,
+// so that copy passes through this hook.
 unsafe fn offer_message_to_baseview(msg: *mut MSG) -> bool {
     let msg = &*msg;
 

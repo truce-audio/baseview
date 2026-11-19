@@ -443,6 +443,12 @@ pub(super) struct WindowState {
 }
 
 impl WindowState {
+    /// `true` when this process created the window. Plug-in editors are
+    /// parented into a host window and leave `ns_window` empty.
+    pub(super) fn owns_window(&self) -> bool {
+        self.window_inner.ns_window.get().is_some()
+    }
+
     /// Gets the `WindowState` held by a given `NSView`.
     ///
     /// This method returns a cloned `Rc<WindowState>` rather than just a `&WindowState`, since the

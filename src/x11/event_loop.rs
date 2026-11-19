@@ -1,14 +1,16 @@
 use crate::x11::keyboard::{convert_key_press_event, convert_key_release_event, key_mods};
 use crate::x11::{ParentHandle, Window, WindowInner};
 use crate::{
-    Event, MouseButton, MouseEvent, PhyPoint, PhySize, ScrollDelta, WindowEvent, WindowHandler,
-    WindowInfo,
+    Event, EventStatus, MouseButton, MouseEvent, PhyPoint, PhySize, ScrollDelta, WindowEvent,
+    WindowHandler, WindowInfo,
 };
 use std::error::Error;
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt as _};
+use x11rb::protocol::xproto::{
+    ConfigureWindowAux, ConnectionExt as _, EventMask, KeyPressEvent,
+};
 use x11rb::protocol::Event as XEvent;
 
 pub(super) struct EventLoop {
@@ -258,11 +260,17 @@ impl EventLoop {
             // keys
             ////
             XEvent::KeyPress(event) => {
-                self.handle_event(Event::Keyboard(convert_key_press_event(&event)));
+                let status = self.handle_event(Event::Keyboard(convert_key_press_event(&event)));
+                if status == EventStatus::Ignored {
+                    self.forward_x_key(event);
+                }
             }
 
             XEvent::KeyRelease(event) => {
-                self.handle_event(Event::Keyboard(convert_key_release_event(&event)));
+                let status = self.handle_event(Event::Keyboard(convert_key_release_event(&event)));
+                if status == EventStatus::Ignored {
+                    self.forward_x_key(event);
+                }
             }
 
             XEvent::FocusIn(_) => {
@@ -277,8 +285,21 @@ impl EventLoop {
         }
     }
 
-    fn handle_event(&mut self, event: Event) {
-        self.handler.on_event(&mut crate::Window::new(Window { inner: &self.window }), event);
+    fn handle_event(&mut self, event: Event) -> EventStatus {
+        self.handler.on_event(&mut crate::Window::new(Window { inner: &self.window }), event)
+    }
+
+    /// Hand an unused key to the window the host embedded us in.
+    /// `send_event` with propagate walks up from that parent until some
+    /// window selects key presses. Standalone has no embed parent.
+    fn forward_x_key(&self, mut event: KeyPressEvent) {
+        let Some(parent) = self.window.embed_parent_id else { return };
+        let press = event.response_type & 0x7f == 2;
+        event.event = parent;
+        event.child = self.window.window_id;
+        let mask = if press { EventMask::KEY_PRESS } else { EventMask::KEY_RELEASE };
+        let _ = self.window.xcb_connection.conn.send_event(true, parent, mask, event);
+        let _ = self.window.xcb_connection.conn.flush();
     }
 
     fn handle_close_requested(&mut self) {
