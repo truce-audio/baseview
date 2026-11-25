@@ -888,11 +888,9 @@ fn responder_reaches_audio_unit(view: &NSView) -> bool {
         if steps == 12 {
             break;
         }
-        let name = class_name(&responder);
-        if name == "AUAudioUnitViewService"
-            || name == "AudioUnitFactory"
-            || name == "FlippedAUContainerView"
-        {
+        if class_name_matches(&responder, |n| {
+            matches!(n, b"AUAudioUnitViewService" | b"AudioUnitFactory" | b"FlippedAUContainerView")
+        }) {
             return true;
         }
         next = unsafe { responder.nextResponder() };
@@ -906,7 +904,7 @@ fn window_has_editor(window: &NSWindow) -> bool {
 }
 
 fn subtree_has_editor(view: &NSView) -> bool {
-    if class_name(view.as_ref()).starts_with("BaseviewNSView") {
+    if class_name_matches(view.as_ref(), |n| n.starts_with(b"BaseviewNSView")) {
         return true;
     }
     for sub in view.subviews().iter() {
@@ -926,9 +924,12 @@ fn find_window(app: &NSApplication, id: i64) -> Option<Retained<NSWindow>> {
         .map(|window| window.retain())
 }
 
-fn class_name(obj: &AnyObject) -> String {
+/// Whether `obj`'s class name satisfies `pred`. The name is a borrowed
+/// `&CStr`, so nothing is allocated - the key-forwarding path calls this
+/// per view and per responder on every ignored key.
+fn class_name_matches(obj: &AnyObject, pred: impl Fn(&[u8]) -> bool) -> bool {
     let class: &AnyClass = unsafe { msg_send![obj, class] };
-    class.name().to_str().unwrap_or("?").to_string()
+    pred(class.name().to_bytes())
 }
 
 /// The editor owns this window, so the window is not a candidate for host
