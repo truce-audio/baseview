@@ -496,7 +496,13 @@ unsafe fn wnd_proc_inner(
                     EventStatus::Ignored
                 );
             }
-            if forward {
+            // Route a key to the host when the editor did not use it, or
+            // when it is a system chord (Alt+F4, Alt+Space) - those are
+            // window-manager commands the editor does not get to swallow,
+            // even when it captured the key. The editor only keeps a
+            // captured plain key. (master let every WM_SYSKEYDOWN reach
+            // DefWindowProc regardless of the handler's answer.)
+            if ready && (forward || is_sys_key(msg)) {
                 // A hosted window gets a copy on the top-level host window.
                 // Posting, rather than SendMessage, is what Live and Reaper
                 // honour, and it does not re-enter this procedure.
