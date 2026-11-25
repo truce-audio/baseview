@@ -15,16 +15,16 @@ use windows_sys::Win32::{
             TRACKMOUSEEVENT,
         },
         WindowsAndMessaging::{
-            AdjustWindowRectEx, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-            GetParent, LoadCursorW, PostMessageW, SetCursor, SetTimer, SetWindowPos,
-            TranslateMessage, HTCLIENT, MSG, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOZORDER, WHEEL_DELTA,
-            WM_CHAR, WM_CLOSE, WM_DPICHANGED, WM_INPUTLANGCHANGE, WM_KEYDOWN, WM_KEYUP,
-            WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP,
-            WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
-            WM_SETCURSOR, WM_SETFOCUS, WM_SHOWWINDOW, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN,
-            WM_SYSKEYUP, WM_TIMER, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP, WS_CAPTION, WS_CHILD,
-            WS_CLIPSIBLINGS, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUPWINDOW, WS_SIZEBOX,
-            WS_VISIBLE,
+            AdjustWindowRectEx, DefWindowProcW, DestroyWindow, DispatchMessageW, GetAncestor,
+            GetMessageW, LoadCursorW, PostMessageW, SetCursor, SetTimer, SetWindowPos,
+            TranslateMessage, GA_ROOTOWNER, HTCLIENT, MSG, SWP_NOACTIVATE, SWP_NOMOVE,
+            SWP_NOZORDER, WHEEL_DELTA, WM_CHAR, WM_CLOSE, WM_DPICHANGED, WM_INPUTLANGCHANGE,
+            WM_KEYDOWN, WM_KEYUP, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
+            WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+            WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SHOWWINDOW, WM_SIZE, WM_SYSCHAR,
+            WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER, WM_USER, WM_XBUTTONDOWN, WM_XBUTTONUP,
+            WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS, WS_MAXIMIZEBOX, WS_MINIMIZEBOX, WS_POPUPWINDOW,
+            WS_SIZEBOX, WS_VISIBLE,
         },
     },
 };
@@ -64,18 +64,18 @@ fn is_sys_key(msg: u32) -> bool {
     matches!(msg, WM_SYSKEYDOWN | WM_SYSKEYUP | WM_SYSCHAR)
 }
 
-/// Top-level window above `hwnd`. A plug-in editor is a child of the host
-/// window; walking parents stops at that top-level window. A standalone
-/// window has no parent, so this returns `hwnd` itself.
+/// The top-level host window that owns `hwnd`. A plug-in editor is a
+/// child of the host's window; `GA_ROOTOWNER` walks the parent chain to
+/// the editor's top-level window, then the owner chain to the window that
+/// owns it (a floating plug-in window is owned by the arrange window -
+/// that owner is where the host's command handler lives). A standalone
+/// window owns nothing, so `GetAncestor` returns `hwnd` itself.
+///
+/// `GetParent` can't express this: for a `WS_POPUP` top-level window it
+/// returns the owner, so looping over it walks past the top-level window
+/// and the result depends on the host's window styles.
 fn host_root(hwnd: HWND) -> HWND {
-    let mut current = hwnd;
-    loop {
-        let parent = unsafe { GetParent(current) };
-        if parent.is_null() {
-            return current;
-        }
-        current = parent;
-    }
+    unsafe { GetAncestor(hwnd, GA_ROOTOWNER) }
 }
 
 #[allow(non_snake_case)]
