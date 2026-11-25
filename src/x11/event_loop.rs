@@ -8,7 +8,9 @@ use std::error::Error;
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt as _, EventMask, KeyPressEvent};
+use x11rb::protocol::xproto::{
+    ConfigureWindowAux, ConnectionExt as _, EventMask, KeyPressEvent, KEY_PRESS_EVENT,
+};
 use x11rb::protocol::Event as XEvent;
 
 pub(super) struct EventLoop {
@@ -291,8 +293,15 @@ impl EventLoop {
     /// `send_event` with propagate walks up from that parent until some
     /// window selects key presses. Standalone has no embed parent.
     fn forward_x_key(&self, mut event: KeyPressEvent) {
+        // The SendEvent bit (0x80) marks a synthetic event. If the host
+        // re-delivers keys to the embedded window (XEmbed key forwarding),
+        // re-forwarding would ping-pong between the two windows. Only
+        // forward keys the server delivered to us directly.
+        if event.response_type & 0x80 != 0 {
+            return;
+        }
         let Some(parent) = self.window.embed_parent_id else { return };
-        let press = event.response_type & 0x7f == 2;
+        let press = event.response_type & 0x7f == KEY_PRESS_EVENT;
         event.event = parent;
         event.child = self.window.window_id;
         let mask = if press { EventMask::KEY_PRESS } else { EventMask::KEY_RELEASE };
