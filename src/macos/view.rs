@@ -6,18 +6,16 @@ use objc2::rc::Allocated;
 use objc2::runtime::{
     AnyClass, AnyObject, Bool, ClassBuilder, NSObjectProtocol, ProtocolObject, Sel,
 };
-use objc2::{msg_send, sel, AllocAnyThread, ClassType, MainThreadMarker, Message};
+use objc2::{msg_send, sel, AllocAnyThread, ClassType};
 use objc2_app_kit::{
-    NSApplication, NSDragOperation, NSDraggingInfo, NSEvent, NSEventType, NSFilenamesPboardType,
-    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidBecomeKeyNotification,
+    NSDragOperation, NSDraggingInfo, NSEvent, NSEventType, NSFilenamesPboardType, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowDidBecomeKeyNotification,
     NSWindowDidResignKeyNotification,
 };
 use objc2_core_foundation::CFUUID;
 use objc2_foundation::{
     NSArray, NSNotification, NSNotificationCenter, NSPoint, NSRect, NSSize, NSString,
 };
-use std::cell::RefCell;
-use std::collections::HashSet;
 use std::ffi::{c_void, CStr, CString};
 use std::rc::Rc;
 
@@ -69,9 +67,6 @@ macro_rules! add_simple_keyboard_class_method {
         extern "C-unwind" fn $sel(this: &NSView, _: Sel, event: &NSEvent) {
             let state = unsafe { WindowState::from_view(this) };
             let forward = $forward;
-            if forward && !state.owns_window() {
-                track_editor_and_host(this);
-            }
             let ignored = match state.process_native_key_event(event) {
                 Some(key_event) => {
                     matches!(state.trigger_event(Event::Keyboard(key_event)), EventStatus::Ignored)
@@ -193,10 +188,6 @@ unsafe fn create_view_class() -> &'static AnyClass {
         class.add_method(
             sel!(viewWillMoveToWindow:),
             view_will_move_to_window as extern "C-unwind" fn(_, _, _) -> _,
-        );
-        class.add_method(
-            sel!(viewDidMoveToWindow),
-            view_did_move_to_window as extern "C-unwind" fn(_, _) -> _,
         );
         // Only meaningful with a GL render subview to redirect hits away
         // from (see `hit_test`). truce-gui presents via wgpu/CoreGraphics,
@@ -524,14 +515,6 @@ extern "C-unwind" fn hit_test(this: &NSView, _sel: Sel, point: NSPoint) -> Optio
 extern "C-unwind" fn view_will_move_to_window(
     this: &NSView, _self: Sel, new_window: Option<&NSWindow>,
 ) {
-    // Remember the document window before this editor can become main.
-    if new_window.is_none() {
-        if let Some(window) = this.window() {
-            forget_editor_window(window_number(&window));
-        }
-    } else {
-        note_host_main();
-    }
     let tracking_areas = this.trackingAreas();
 
     match new_window {
@@ -556,14 +539,6 @@ extern "C-unwind" fn view_will_move_to_window(
         let superclass = msg_send![this, superclass];
 
         let () = msg_send![super(this, superclass), viewWillMoveToWindow: new_window];
-    }
-}
-
-extern "C-unwind" fn view_did_move_to_window(this: &NSView, _: Sel) {
-    track_editor_and_host(this);
-    unsafe {
-        let superclass = msg_send![this, superclass];
-        let () = msg_send![super(this, superclass), viewDidMoveToWindow];
     }
 }
 
@@ -752,83 +727,24 @@ extern "C-unwind" fn handle_notification(this: &NSView, _cmd: Sel, notification:
     }));
 }
 
-/// Plug-in windows this process owns, and the last document window that was
-/// main. A sibling editor is not the host. The host window can be smaller.
-struct EditorWindows {
-    owned: HashSet<i64>,
-    host: Option<i64>,
-}
-
-std::thread_local! {
-    static EDITOR_WINDOWS: RefCell<EditorWindows> = RefCell::new(EditorWindows {
-        owned: HashSet::new(),
-        host: None,
-    });
-}
-
-fn window_number(window: &NSWindow) -> i64 {
-    window.windowNumber() as i64
-}
-
-fn note_editor_window(id: i64) {
-    EDITOR_WINDOWS.with(|slot| {
-        slot.borrow_mut().owned.insert(id);
-    });
-}
-
-fn forget_editor_window(id: i64) {
-    EDITOR_WINDOWS.with(|slot| {
-        slot.borrow_mut().owned.remove(&id);
-    });
-}
-
-/// `mainWindow` is the document, unless it is one of our editors.
-fn note_host_main() {
-    let Some(mtm) = MainThreadMarker::new() else { return };
-    let app = NSApplication::sharedApplication(mtm);
-    let Some(main) = app.mainWindow() else { return };
-    if !main.isVisible() {
-        return;
-    }
-    let id = window_number(&main);
-    EDITOR_WINDOWS.with(|slot| {
-        let mut slot = slot.borrow_mut();
-        if !slot.owned.contains(&id) {
-            slot.host = Some(id);
-        }
-    });
-}
-
-fn track_editor_and_host(view: &NSView) {
-    if let Some(window) = view.window() {
-        let id = window_number(&window);
-        if fills_its_window(view) {
-            note_editor_window(id);
-        } else {
-            forget_editor_window(id);
-        }
-    }
-    note_host_main();
-}
-
-/// Main window, then the editor's parent, then the last document window
-/// that was main. Editor windows are skipped. Size is not a factor.
-fn host_window_ids(
-    owned: &[i64], self_id: Option<i64>, main: Option<i64>, parent: Option<i64>,
-    remembered: Option<i64>,
-) -> [Option<i64>; 3] {
-    let allow = |id: Option<i64>| id.filter(|id| self_id != Some(*id) && !owned.contains(id));
-    [allow(main), allow(parent), allow(remembered)]
-}
-
 /// Give a key the editor did not use back to the host.
 ///
-/// An Audio Unit view runs in its own process. The host's windows are not
-/// in that process. The chain above the editor (`AUAudioUnitViewService`)
-/// is what hands the key to the host, so that chain wins. Another editor
-/// window in this process is not the host. An in-process plug-in still
-/// sends the key to the document window. Standalone owns its window and
-/// drops the key.
+/// Every target is a structural relationship, never a guess about which
+/// window is "the document":
+/// - Out-of-process AU: the chain above the editor
+///   (`AUAudioUnitViewService`) bridges to the host process, so resume the
+///   key up it.
+/// - In-process child-window editor: a host that floats the editor in its
+///   own `NSWindow` makes `parentWindow` point at the window that owns it
+///   (the arrange), where the host's transport and command handlers live.
+///   The child window's responder chain dead-ends at itself, so the key is
+///   delivered to the parent. This is the one case that bypasses the
+///   editor window's own chain, a deliberate trade for reaching the host.
+/// - In-process embedded editor: resume the key up the editor's own
+///   responder chain, which reaches the containing host window and the main
+///   menu, exactly as if this view had not handled the key.
+/// - No structural signal (or standalone): drop the key rather than send it
+///   to an arbitrary window and type into some unrelated text field.
 fn forward_unused_key(view: &NSView, event: &NSEvent, standalone: bool) {
     std::thread_local! {
         static BUSY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -851,34 +767,13 @@ fn forward_unused_key(view: &NSView, event: &NSEvent, standalone: bool) {
         deliver_to_next(view, event);
         return;
     }
-    let Some(mtm) = MainThreadMarker::new() else { return };
-    let app = NSApplication::sharedApplication(mtm);
-    let ours = view.window();
-    let self_id = ours.as_ref().map(|window| window_number(window));
-    let main =
-        app.mainWindow().filter(|window| window.isVisible()).map(|window| window_number(&window));
-    let parent = ours
-        .as_ref()
-        .and_then(|window| window.parentWindow())
-        .filter(|window| window.isVisible())
-        .map(|window| window_number(&window));
-    let (owned, remembered) = EDITOR_WINDOWS.with(|slot| {
-        let slot = slot.borrow();
-        let owned: Vec<i64> = slot.owned.iter().copied().collect();
-        (owned, slot.host)
-    });
-    for id in host_window_ids(&owned, self_id, main, parent, remembered).into_iter().flatten() {
-        if let Some(host) = find_window(&app, id) {
-            if window_has_editor(&host) {
-                continue;
-            }
-            send_key(&host, event);
-            return;
-        }
+    if let Some(parent) =
+        view.window().and_then(|window| window.parentWindow()).filter(|parent| parent.isVisible())
+    {
+        send_key(&parent, event);
+        return;
     }
-    if next_is_host_view(view) {
-        deliver_to_next(view, event);
-    }
+    deliver_to_next(view, event);
 }
 
 fn responder_reaches_audio_unit(view: &NSView) -> bool {
@@ -899,53 +794,12 @@ fn responder_reaches_audio_unit(view: &NSView) -> bool {
     false
 }
 
-fn window_has_editor(window: &NSWindow) -> bool {
-    window.contentView().is_some_and(|view| subtree_has_editor(&view))
-}
-
-fn subtree_has_editor(view: &NSView) -> bool {
-    if class_name_matches(view.as_ref(), |n| n.starts_with(b"BaseviewNSView")) {
-        return true;
-    }
-    for sub in view.subviews().iter() {
-        if subtree_has_editor(&sub) {
-            return true;
-        }
-    }
-    false
-}
-
-fn find_window(app: &NSApplication, id: i64) -> Option<Retained<NSWindow>> {
-    app.windows()
-        .iter()
-        .find(|window| {
-            window_number(window) == id && window.isVisible() && !window.isMiniaturized()
-        })
-        .map(|window| window.retain())
-}
-
 /// Whether `obj`'s class name satisfies `pred`. The name is a borrowed
 /// `&CStr`, so nothing is allocated - the key-forwarding path calls this
 /// per view and per responder on every ignored key.
 fn class_name_matches(obj: &AnyObject, pred: impl Fn(&[u8]) -> bool) -> bool {
     let class: &AnyClass = unsafe { msg_send![obj, class] };
     pred(class.name().to_bytes())
-}
-
-/// The editor owns this window, so the window is not a candidate for host
-/// keys. A view embedded in the arrange window does not fill it.
-fn fills_its_window(view: &NSView) -> bool {
-    let Some(window) = view.window() else { return false };
-    let Some(content) = window.contentView() else { return false };
-    let content = content.bounds().size;
-    let ours = view.bounds().size;
-    // A header in the plug-in window keeps the editor below 85% of the
-    // content view. Half still means this view owns the window. An editor
-    // embedded in the arrange is a much smaller fraction.
-    content.width > 1.0
-        && content.height > 1.0
-        && ours.width >= content.width * 0.5
-        && ours.height >= content.height * 0.5
 }
 
 fn next_is_host_view(view: &NSView) -> bool {
@@ -986,42 +840,4 @@ fn send_key(window: &NSWindow, event: &NSEvent) {
         return;
     };
     window.sendEvent(&copy);
-}
-
-#[cfg(test)]
-mod host_key_tests {
-    use super::host_window_ids;
-
-    #[test]
-    fn the_main_window_is_the_host_at_any_size() {
-        let owned = [10];
-        assert_eq!(host_window_ids(&owned, Some(10), Some(20), None, None), [Some(20), None, None]);
-    }
-
-    #[test]
-    fn a_sibling_editor_is_not_the_host() {
-        let owned = [10, 11];
-        assert_eq!(
-            host_window_ids(&owned, Some(11), Some(10), None, Some(20)),
-            [None, None, Some(20)]
-        );
-    }
-
-    #[test]
-    fn the_parent_is_used_when_main_is_an_editor() {
-        let owned = [10];
-        assert_eq!(
-            host_window_ids(&owned, Some(10), Some(10), Some(30), Some(20)),
-            [None, Some(30), Some(20)]
-        );
-    }
-
-    #[test]
-    fn an_editor_window_is_never_chosen() {
-        let owned = [10, 20];
-        assert_eq!(
-            host_window_ids(&owned, Some(10), Some(20), Some(10), Some(20)),
-            [None, None, None]
-        );
-    }
 }
