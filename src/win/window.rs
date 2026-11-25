@@ -496,31 +496,33 @@ unsafe fn wnd_proc_inner(
                     EventStatus::Ignored
                 );
             }
-            // Route a key to the host when the editor did not use it, or
-            // when it is a system chord (Alt+F4, Alt+Space) - those are
-            // window-manager commands the editor does not get to swallow,
-            // even when it captured the key. The editor only keeps a
-            // captured plain key. (master let every WM_SYSKEYDOWN reach
-            // DefWindowProc regardless of the handler's answer.)
-            if ready && (forward || is_sys_key(msg)) {
-                // A hosted window gets a copy on the top-level host window.
-                // Posting, rather than SendMessage, is what Live and Reaper
-                // honour, and it does not re-enter this procedure.
-                // Standalone has no host window: a system key still goes to
-                // DefWindowProc (Alt+F4), a plain key is dropped so it does
-                // not beep.
-                if window_state.forward_unused_key(hwnd, msg, wparam, lparam) {
-                    Some(0)
-                } else if is_sys_key(msg) {
-                    None
-                } else {
-                    Some(0)
-                }
-            } else if !ready {
+            if !ready {
+                // Middle of a key/char sequence (dead key, char
+                // composition). Hold it until the message that produces a
+                // key event.
                 window_state.hold_key(msg, wparam, lparam);
                 Some(0)
-            } else {
+            } else if !forward {
+                // The editor used the key - keep it (and any held
+                // fragments), including Alt chords the editor's UI binds.
                 window_state.drop_held_keys();
+                Some(0)
+            } else if is_sys_key(msg) {
+                // An unused system key (Alt chord) is a window command, not
+                // host input: let this window's own DefWindowProc handle it,
+                // exactly as a native window would - Alt+F4 closes the
+                // plug-in window, Alt+Space opens its system menu. It is
+                // never posted to the host: posting Alt+F4 to the arrange
+                // window would ask the DAW to quit, and a lone Alt would drop
+                // the host into menu mode.
+                window_state.drop_held_keys();
+                None
+            } else {
+                // An unused plain key goes to the host's command window so
+                // transport and shortcuts work while the editor has focus.
+                // Posting, rather than SendMessage, is what Live and Reaper
+                // honour, and it does not re-enter this procedure.
+                window_state.forward_unused_key(hwnd, msg, wparam, lparam);
                 Some(0)
             }
         }
@@ -768,20 +770,19 @@ impl WindowState {
     }
 
     /// Post this key, and any messages held from earlier in the same
-    /// sequence, to the top-level host window. `false` when this window
-    /// is that top-level window.
-    fn forward_unused_key(&self, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> bool {
+    /// sequence, to the host's command window. A standalone window owns no
+    /// host window; its held keys are cleared and nothing is posted.
+    fn forward_unused_key(&self, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) {
         let root = host_root(hwnd);
         let mut pending = self.pending_host_keys.borrow_mut();
         if root.is_null() || root == hwnd {
             pending.clear();
-            return false;
+            return;
         }
         for (held_msg, held_w, held_l) in pending.drain(..) {
             unsafe { PostMessageW(root, held_msg, held_w, held_l) };
         }
         unsafe { PostMessageW(root, msg, wparam, lparam) };
-        true
     }
 
     pub(crate) fn handle_on_frame(&self) {
