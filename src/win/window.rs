@@ -78,6 +78,16 @@ fn host_root(hwnd: HWND) -> HWND {
     unsafe { GetAncestor(hwnd, GA_ROOTOWNER) }
 }
 
+/// Post an unused plain key to the host's command window. A standalone
+/// window owns no host window, so nothing is posted.
+fn forward_unused_key(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) {
+    let root = host_root(hwnd);
+    if root.is_null() || root == hwnd {
+        return;
+    }
+    unsafe { PostMessageW(root, msg, wparam, lparam) };
+}
+
 #[allow(non_snake_case)]
 fn HIWORD(wparam: WPARAM) -> u16 {
     ((wparam >> 16) & 0xffff) as u16
@@ -486,8 +496,6 @@ unsafe fn wnd_proc_inner(
             let opt_event = unsafe {
                 window_state.keyboard_state.borrow_mut().process_message(hwnd, msg, wparam, lparam)
             };
-            // `None` is the middle of a key/char sequence. Hold it until the
-            // message that actually produces a key event.
             let mut forward = false;
             let ready = opt_event.is_some();
             if let Some(event) = opt_event {
@@ -497,15 +505,11 @@ unsafe fn wnd_proc_inner(
                 );
             }
             if !ready {
-                // Middle of a key/char sequence (dead key, char
-                // composition). Hold it until the message that produces a
-                // key event.
-                window_state.hold_key(msg, wparam, lparam);
+                // Mid-sequence (dead key / IME composition); the producing
+                // message delivers the event. Nothing to post yet.
                 Some(0)
             } else if !forward {
-                // The editor used the key - keep it (and any held
-                // fragments), including Alt chords the editor's UI binds.
-                window_state.drop_held_keys();
+                // The editor used the key - keep it.
                 Some(0)
             } else if is_sys_key(msg) {
                 // An unused system key (Alt chord) is a window command, not
@@ -515,14 +519,20 @@ unsafe fn wnd_proc_inner(
                 // never posted to the host: posting Alt+F4 to the arrange
                 // window would ask the DAW to quit, and a lone Alt would drop
                 // the host into menu mode.
-                window_state.drop_held_keys();
                 None
+            } else if msg == WM_CHAR {
+                // A character the editor did not use. Never posted: the host
+                // regenerates WM_CHAR by translating the WM_KEYDOWN we
+                // forwarded, so posting this too would type it twice. In
+                // practice the WH_GETMESSAGE hook consumes keys before
+                // TranslateMessage, so no WM_CHAR reaches this window at all.
+                Some(0)
             } else {
                 // An unused plain key goes to the host's command window so
                 // transport and shortcuts work while the editor has focus.
                 // Posting, rather than SendMessage, is what Live and Reaper
                 // honour, and it does not re-enter this procedure.
-                window_state.forward_unused_key(hwnd, msg, wparam, lparam);
+                forward_unused_key(hwnd, msg, wparam, lparam);
                 Some(0)
             }
         }
@@ -643,11 +653,6 @@ pub(super) struct WindowState {
     current_size: Cell<PhySize>,
     current_scale_factor: Cell<f64>,
     keyboard_state: RefCell<KeyboardState>,
-    /// Key messages held until the sequence finishes. Windows splits one
-    /// key into `WM_KEYDOWN` plus `WM_CHAR`. The editor's answer arrives
-    /// on the last message, and an ignored sequence is posted to the host
-    /// together.
-    pending_host_keys: RefCell<Vec<(u32, WPARAM, LPARAM)>>,
     mouse_button_counter: Cell<usize>,
     mouse_was_outside_window: Cell<bool>,
     cursor_icon: Cell<MouseCursor>,
@@ -696,7 +701,6 @@ impl WindowState {
             current_scale_factor: scaling.into(),
             current_size: current_size.into(),
             keyboard_state: RefCell::new(KeyboardState::new()),
-            pending_host_keys: RefCell::new(Vec::new()),
             mouse_button_counter: Cell::new(0),
             mouse_was_outside_window: true.into(),
             cursor_icon: Cell::new(MouseCursor::Default),
@@ -759,30 +763,6 @@ impl WindowState {
         if !ctx.is_null() {
             drop(unsafe { Box::from_raw(ctx) });
         }
-    }
-
-    fn hold_key(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) {
-        self.pending_host_keys.borrow_mut().push((msg, wparam, lparam));
-    }
-
-    fn drop_held_keys(&self) {
-        self.pending_host_keys.borrow_mut().clear();
-    }
-
-    /// Post this key, and any messages held from earlier in the same
-    /// sequence, to the host's command window. A standalone window owns no
-    /// host window; its held keys are cleared and nothing is posted.
-    fn forward_unused_key(&self, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) {
-        let root = host_root(hwnd);
-        let mut pending = self.pending_host_keys.borrow_mut();
-        if root.is_null() || root == hwnd {
-            pending.clear();
-            return;
-        }
-        for (held_msg, held_w, held_l) in pending.drain(..) {
-            unsafe { PostMessageW(root, held_msg, held_w, held_l) };
-        }
-        unsafe { PostMessageW(root, msg, wparam, lparam) };
     }
 
     pub(crate) fn handle_on_frame(&self) {
