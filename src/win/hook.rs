@@ -117,9 +117,12 @@ unsafe extern "system" fn keyboard_hook_callback(
 
 // check if `msg` is a keyboard message addressed to a window
 // in KeyboardHookState::open_windows, and intercept it if so.
-// An ignored key is not left in this message: the window procedure
-// posts a copy to the top-level host window, which is not one of ours,
-// so that copy passes through this hook.
+// An ignored key is not left in this message: the window procedure posts
+// a copy to the top-level host window. For a real plug-in host that window
+// is not one of ours, so the copy passes straight through this hook. In the
+// `open_parented` example the parent is also ours and the copy is
+// re-intercepted, but the parent is a top-level window that owns itself, so
+// `forward_unused_key` finds no further host and stops - no loop.
 unsafe fn offer_message_to_baseview(msg: *mut MSG) -> bool {
     let msg = &*msg;
 

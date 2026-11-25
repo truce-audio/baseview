@@ -13,6 +13,7 @@ This is a fork of [RustAudio/baseview](https://github.com/RustAudio/baseview) (p
 - **`hit_test` gated behind `opengl` cfg** so CPU-only renderers (wgpu via `CAMetalLayer`, CoreGraphics blit) get AppKit's default hit-testing back — see [CPU-only hit-test gate](#cpu-only-hit-test-gate).
 - **Windows frame pacing via a multimedia timer** on Windows — replaces the low-priority, coalescing `WM_TIMER` that drove `on_frame` with a non-coalescing posted-message timer, fixing slow / bursty editor repaints inside busy DAWs, plus a re-entrancy guard so a render that pumps the message queue can't abort the host — see [Windows frame pacing](#windows-frame-pacing).
 - **Embed-parent resize tracking** on Linux/X11 — mirrors the host embed window's size onto the child so editors follow a host-driven resize even when the DAW resizes the parent directly instead of calling the plugin resize API (Bitwig) — see [Linux embed-parent resize](#linux-embed-parent-resize).
+- **Unused-key forwarding to the host** on macOS/Windows/X11 - a key the handler returns `EventStatus::Ignored` for is passed back to the host window, so DAW shortcuts (transport, etc.) keep working while a plug-in editor is focused. See [Keyboard forwarding to the host](#keyboard-forwarding-to-the-host).
 
 > **Note:** This package is a temporary fork intended to live only until these patches are merged upstream into [RustAudio/baseview](https://github.com/RustAudio/baseview). Once upstream carries the fixes, switch back to the canonical crate — there is nothing here that should outlive that merge.
 
@@ -158,6 +159,18 @@ The fix, entirely in `src/x11/`:
 - In the event loop, a `ConfigureNotify` for the embed parent mirrors the parent's new size onto the child via `configure_window`. The child's own `ConfigureNotify` then flows through the existing path, emitting `WindowEvent::Resized` so backends reconfigure their surfaces exactly as they do for any other resize.
 
 This is X11-only and no-ops for non-embedded windows, so macOS / Windows and standalone top-level windows are unaffected.
+
+## Keyboard forwarding to the host
+
+Upstream baseview defines `EventStatus::Ignored` as "pass the event back to the platform," but only macOS acted on it for keyboard events; Windows and X11 discarded the return. So a key the editor did not use (Space for the transport, a DAW command shortcut) went nowhere while the plug-in window had focus.
+
+This fork forwards `Ignored` keyboard events to the host on all three platforms, each through the platform's own host relationship rather than a guess about which window is "the document":
+
+- **macOS** (`src/macos/view.rs`): an out-of-process Audio Unit view resumes the key up its responder chain (the `AUAudioUnitViewService` chain bridges to the host process); an in-process editor floated in a child window posts to the explicit `parentWindow`; an embedded editor resumes the key up its own responder chain to the containing host window and the main menu. With no structural host relationship the key is dropped rather than sent to an arbitrary window.
+- **Windows** (`src/win/window.rs`): an unused plain key is posted (`PostMessageW`, which Live and Reaper honour and which does not re-enter the window procedure) to the host's command window (`GetAncestor(…, GA_ROOTOWNER)`). System keys (Alt chords) are left to the editor's own `DefWindowProc`, so Alt+F4 / Alt+Space behave as they would for a native window instead of reaching the DAW. Captured keys are never forwarded.
+- **X11** (`src/x11/event_loop.rs`): an unused key is re-sent to the embed parent with `send_event`. Synthetic events (the `SendEvent` bit) are skipped, so a host that re-delivers keys to the embedded window cannot ping-pong.
+
+The forward decision is the handler's returned `EventStatus`, so a `WindowHandler` must return `Captured` for keys it consumes (a focused text field, an editor shortcut) or the host will also act on them. Standalone top-level windows own their window and forward nothing.
 
 ## Release scripts
 
