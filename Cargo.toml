@@ -112,7 +112,7 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
 members = ["examples/open_parented", "examples/open_window", "examples/render_femtovg"]
 
 [lints.clippy]
-missing-safety-doc = "allow"
+missing_safety_doc = "allow"
 
 [package.metadata.docs.rs]
 all-features = true

@@ -814,10 +814,7 @@ fn track_editor_and_host(view: &NSView) {
 /// Main window, then the editor's parent, then the last document window
 /// that was main. Editor windows are skipped. Size is not a factor.
 fn host_window_ids(
-    owned: &[i64],
-    self_id: Option<i64>,
-    main: Option<i64>,
-    parent: Option<i64>,
+    owned: &[i64], self_id: Option<i64>, main: Option<i64>, parent: Option<i64>,
     remembered: Option<i64>,
 ) -> [Option<i64>; 3] {
     let allow = |id: Option<i64>| id.filter(|id| self_id != Some(*id) && !owned.contains(id));
@@ -858,10 +855,8 @@ fn forward_unused_key(view: &NSView, event: &NSEvent, standalone: bool) {
     let app = NSApplication::sharedApplication(mtm);
     let ours = view.window();
     let self_id = ours.as_ref().map(|window| window_number(window));
-    let main = app
-        .mainWindow()
-        .filter(|window| window.isVisible())
-        .map(|window| window_number(&window));
+    let main =
+        app.mainWindow().filter(|window| window.isVisible()).map(|window| window_number(&window));
     let parent = ours
         .as_ref()
         .and_then(|window| window.parentWindow())
@@ -872,10 +867,7 @@ fn forward_unused_key(view: &NSView, event: &NSEvent, standalone: bool) {
         let owned: Vec<i64> = slot.owned.iter().copied().collect();
         (owned, slot.host)
     });
-    for id in host_window_ids(&owned, self_id, main, parent, remembered)
-        .into_iter()
-        .flatten()
-    {
+    for id in host_window_ids(&owned, self_id, main, parent, remembered).into_iter().flatten() {
         if let Some(host) = find_window(&app, id) {
             if window_has_editor(&host) {
                 continue;
@@ -896,7 +888,7 @@ fn responder_reaches_audio_unit(view: &NSView) -> bool {
         if steps == 12 {
             break;
         }
-        let name = class_name(&*responder);
+        let name = class_name(&responder);
         if name == "AUAudioUnitViewService"
             || name == "AudioUnitFactory"
             || name == "FlippedAUContainerView"
@@ -910,9 +902,7 @@ fn responder_reaches_audio_unit(view: &NSView) -> bool {
 }
 
 fn window_has_editor(window: &NSWindow) -> bool {
-    window
-        .contentView()
-        .is_some_and(|view| subtree_has_editor(&view))
+    window.contentView().is_some_and(|view| subtree_has_editor(&view))
 }
 
 fn subtree_has_editor(view: &NSView) -> bool {
@@ -1004,10 +994,7 @@ mod host_key_tests {
     #[test]
     fn the_main_window_is_the_host_at_any_size() {
         let owned = [10];
-        assert_eq!(
-            host_window_ids(&owned, Some(10), Some(20), None, None),
-            [Some(20), None, None]
-        );
+        assert_eq!(host_window_ids(&owned, Some(10), Some(20), None, None), [Some(20), None, None]);
     }
 
     #[test]

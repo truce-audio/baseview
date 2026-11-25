@@ -8,9 +8,7 @@ use std::error::Error;
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
-use x11rb::protocol::xproto::{
-    ConfigureWindowAux, ConnectionExt as _, EventMask, KeyPressEvent,
-};
+use x11rb::protocol::xproto::{ConfigureWindowAux, ConnectionExt as _, EventMask, KeyPressEvent};
 use x11rb::protocol::Event as XEvent;
 
 pub(super) struct EventLoop {
