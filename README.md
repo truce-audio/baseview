@@ -179,7 +179,7 @@ X11 has no repeat flag. Unless a client turns on detectable auto-repeat, a held 
 
 The fix, in `src/x11/`: the event loop looks one event ahead while draining the queue. A `KeyRelease` followed by a `KeyPress` of the same key, window and timestamp is one repeat tick, so the release is dropped and the press delivered with `repeat: true`. A real release and re-press can't share a timestamp, so they pass through unchanged. It is the check GLFW, SDL and winit use. It needs no X extension, unlike `XkbSetDetectableAutoRepeat`. It adds no delay, unlike holding releases back for a timeout. If the server's release is read before its press has arrived, that one tick still reads as a release and press, as before; X sends the two together, so this is rare.
 
-An `Ignored` repeat press is forwarded to the embed parent like any other key, without the dropped release, which matches what a host sees under detectable auto-repeat.
+An `Ignored` repeat press goes to the embed parent with its release, both in one flush, as the server sent them, so a parent that does the same check also sees a repeat. Forwarding the press alone made it a fresh press: an editor child that ignores a held note key, as in truce's standalone, retriggered the note in its parent.
 
 ## Versioning and releases
 

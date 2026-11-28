@@ -11,7 +11,8 @@ use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    ConfigureWindowAux, ConnectionExt as _, EventMask, KeyPressEvent, KEY_PRESS_EVENT,
+    ConfigureWindowAux, ConnectionExt as _, EventMask, KeyPressEvent, KeyReleaseEvent,
+    KEY_PRESS_EVENT,
 };
 use x11rb::protocol::Event as XEvent;
 
@@ -59,9 +60,9 @@ impl EventLoop {
                 if let Some(XEvent::KeyPress(press)) =
                     next.as_ref().filter(|n| is_auto_repeat(release, n))
                 {
-                    let press = *press;
+                    let (release, press) = (*release, *press);
                     next = self.window.xcb_connection.conn.poll_for_event()?;
-                    self.handle_key_press(press, true);
+                    self.handle_key_repeat(release, press);
                     continue;
                 }
             }
@@ -283,7 +284,7 @@ impl EventLoop {
             XEvent::KeyRelease(event) => {
                 let status = self.handle_event(Event::Keyboard(convert_key_release_event(&event)));
                 if status == EventStatus::Ignored {
-                    self.forward_x_key(event);
+                    self.forward_x_keys(&[event]);
                 }
             }
 
@@ -302,7 +303,18 @@ impl EventLoop {
     fn handle_key_press(&mut self, event: KeyPressEvent, repeat: bool) {
         let status = self.handle_event(Event::Keyboard(convert_key_press_event(&event, repeat)));
         if status == EventStatus::Ignored {
-            self.forward_x_key(event);
+            self.forward_x_keys(&[event]);
+        }
+    }
+
+    /// One auto-repeat tick: the press reaches the handler as a repeat. A
+    /// handler that doesn't use it hands the embed parent the tick as the
+    /// server sent it, release and press together, so the parent can
+    /// recognize the repeat too rather than read a fresh press.
+    fn handle_key_repeat(&mut self, release: KeyReleaseEvent, press: KeyPressEvent) {
+        let status = self.handle_event(Event::Keyboard(convert_key_press_event(&press, true)));
+        if status == EventStatus::Ignored {
+            self.forward_x_keys(&[release, press]);
         }
     }
 
@@ -313,20 +325,25 @@ impl EventLoop {
     /// Hand an unused key to the window the host embedded us in.
     /// `send_event` with propagate walks up from that parent until some
     /// window selects key presses. Standalone has no embed parent.
-    fn forward_x_key(&self, mut event: KeyPressEvent) {
-        // The SendEvent bit (0x80) marks a synthetic event. If the host
-        // re-delivers keys to the embedded window (XEmbed key forwarding),
-        // re-forwarding would ping-pong between the two windows. Only
-        // forward keys the server delivered to us directly.
-        if event.response_type & 0x80 != 0 {
-            return;
-        }
+    /// Several keys go in one flush, so a forwarded auto-repeat tick
+    /// reaches the parent as one release-press pair.
+    fn forward_x_keys(&self, events: &[KeyPressEvent]) {
         let Some(parent) = self.window.embed_parent_id else { return };
-        let press = event.response_type & 0x7f == KEY_PRESS_EVENT;
-        event.event = parent;
-        event.child = self.window.window_id;
-        let mask = if press { EventMask::KEY_PRESS } else { EventMask::KEY_RELEASE };
-        let _ = self.window.xcb_connection.conn.send_event(true, parent, mask, event);
+        for &event in events {
+            // The SendEvent bit (0x80) marks a synthetic event. If the host
+            // re-delivers keys to the embedded window (XEmbed key
+            // forwarding), re-forwarding would ping-pong between the two
+            // windows. Only forward keys the server delivered to us directly.
+            if event.response_type & 0x80 != 0 {
+                continue;
+            }
+            let press = event.response_type & 0x7f == KEY_PRESS_EVENT;
+            let mut event = event;
+            event.event = parent;
+            event.child = self.window.window_id;
+            let mask = if press { EventMask::KEY_PRESS } else { EventMask::KEY_RELEASE };
+            let _ = self.window.xcb_connection.conn.send_event(true, parent, mask, event);
+        }
         let _ = self.window.xcb_connection.conn.flush();
     }
 
