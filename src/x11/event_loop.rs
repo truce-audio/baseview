@@ -1,4 +1,6 @@
-use crate::x11::keyboard::{convert_key_press_event, convert_key_release_event, key_mods};
+use crate::x11::keyboard::{
+    convert_key_press_event, convert_key_release_event, is_auto_repeat, key_mods,
+};
 use crate::x11::{ParentHandle, Window, WindowInner};
 use crate::{
     Event, EventStatus, MouseButton, MouseEvent, PhyPoint, PhySize, ScrollDelta, WindowEvent,
@@ -45,7 +47,24 @@ impl EventLoop {
         // when they've all been coalesced.
         self.new_physical_size = None;
 
-        while let Some(event) = self.window.xcb_connection.conn.poll_for_event()? {
+        // One event of lookahead, to recognize an X11 auto-repeat tick (a
+        // `KeyRelease` and the matching `KeyPress` the server sends with
+        // it): the release is dropped and the press delivered with
+        // `repeat: true`, so a held key reads as held, as on macOS and
+        // Windows, instead of being released and pressed again.
+        let mut next = self.window.xcb_connection.conn.poll_for_event()?;
+        while let Some(event) = next.take() {
+            next = self.window.xcb_connection.conn.poll_for_event()?;
+            if let XEvent::KeyRelease(release) = &event {
+                if let Some(XEvent::KeyPress(press)) =
+                    next.as_ref().filter(|n| is_auto_repeat(release, n))
+                {
+                    let press = *press;
+                    next = self.window.xcb_connection.conn.poll_for_event()?;
+                    self.handle_key_press(press, true);
+                    continue;
+                }
+            }
             self.handle_xcb_event(event);
         }
 
@@ -259,12 +278,7 @@ impl EventLoop {
             ////
             // keys
             ////
-            XEvent::KeyPress(event) => {
-                let status = self.handle_event(Event::Keyboard(convert_key_press_event(&event)));
-                if status == EventStatus::Ignored {
-                    self.forward_x_key(event);
-                }
-            }
+            XEvent::KeyPress(event) => self.handle_key_press(event, false),
 
             XEvent::KeyRelease(event) => {
                 let status = self.handle_event(Event::Keyboard(convert_key_release_event(&event)));
@@ -282,6 +296,13 @@ impl EventLoop {
             }
 
             _ => {}
+        }
+    }
+
+    fn handle_key_press(&mut self, event: KeyPressEvent, repeat: bool) {
+        let status = self.handle_event(Event::Keyboard(convert_key_press_event(&event, repeat)));
+        if status == EventStatus::Ignored {
+            self.forward_x_key(event);
         }
     }
 

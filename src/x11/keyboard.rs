@@ -383,7 +383,25 @@ pub(super) fn key_mods(mods: KeyButMask) -> Modifiers {
     ret
 }
 
-pub(super) fn convert_key_press_event(key_press: &KeyPressEvent) -> KeyboardEvent {
+/// Whether `release` and `next`, the event right after it, are one tick
+/// of X11 key auto-repeat. X reports no repeat flag: unless detectable
+/// auto-repeat is on (baseview doesn't enable it), a held key repeats as
+/// a `KeyRelease` immediately followed by a `KeyPress` of the same key
+/// with the same timestamp. A real release and re-press can't share a
+/// timestamp.
+pub(super) fn is_auto_repeat(release: &KeyReleaseEvent, next: &x11rb::protocol::Event) -> bool {
+    matches!(
+        next,
+        x11rb::protocol::Event::KeyPress(press)
+            if press.detail == release.detail
+                && press.time == release.time
+                && press.event == release.event
+    )
+}
+
+/// `repeat` marks a press [`is_auto_repeat`] identified as an auto-repeat
+/// tick, as macOS and Windows report a held key.
+pub(super) fn convert_key_press_event(key_press: &KeyPressEvent, repeat: bool) -> KeyboardEvent {
     let hw_keycode = key_press.detail;
     let code = hardware_keycode_to_code(hw_keycode.into());
     let modifiers = key_mods(key_press.state);
@@ -391,7 +409,7 @@ pub(super) fn convert_key_press_event(key_press: &KeyPressEvent) -> KeyboardEven
     let location = code_to_location(code);
     let state = KeyState::Down;
 
-    KeyboardEvent { code, key, modifiers, location, state, repeat: false, is_composing: false }
+    KeyboardEvent { code, key, modifiers, location, state, repeat, is_composing: false }
 }
 
 pub(super) fn convert_key_release_event(key_release: &KeyReleaseEvent) -> KeyboardEvent {
@@ -403,4 +421,30 @@ pub(super) fn convert_key_release_event(key_release: &KeyReleaseEvent) -> Keyboa
     let state = KeyState::Up;
 
     KeyboardEvent { code, key, modifiers, location, state, repeat: false, is_composing: false }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_auto_repeat;
+    use x11rb::protocol::xproto::{KeyPressEvent, KEY_PRESS_EVENT, KEY_RELEASE_EVENT};
+    use x11rb::protocol::Event;
+
+    fn key(response_type: u8, detail: u8, time: u32) -> KeyPressEvent {
+        KeyPressEvent { response_type, detail, time, event: 7, ..Default::default() }
+    }
+
+    #[test]
+    fn a_release_and_press_of_one_key_at_one_time_is_a_repeat() {
+        let release = key(KEY_RELEASE_EVENT, 38, 1000);
+        assert!(is_auto_repeat(&release, &Event::KeyPress(key(KEY_PRESS_EVENT, 38, 1000))));
+    }
+
+    #[test]
+    fn a_real_release_and_press_are_not() {
+        let release = key(KEY_RELEASE_EVENT, 38, 1000);
+        // Re-pressed later, another key, or no press at all.
+        assert!(!is_auto_repeat(&release, &Event::KeyPress(key(KEY_PRESS_EVENT, 38, 1040))));
+        assert!(!is_auto_repeat(&release, &Event::KeyPress(key(KEY_PRESS_EVENT, 39, 1000))));
+        assert!(!is_auto_repeat(&release, &Event::KeyRelease(key(KEY_RELEASE_EVENT, 38, 1000))));
+    }
 }

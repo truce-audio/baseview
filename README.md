@@ -14,6 +14,7 @@ This is a fork of [RustAudio/baseview](https://github.com/RustAudio/baseview) (p
 - **Windows frame pacing via a multimedia timer** on Windows — replaces the low-priority, coalescing `WM_TIMER` that drove `on_frame` with a non-coalescing posted-message timer, fixing slow / bursty editor repaints inside busy DAWs, plus a re-entrancy guard so a render that pumps the message queue can't abort the host — see [Windows frame pacing](#windows-frame-pacing).
 - **Embed-parent resize tracking** on Linux/X11 — mirrors the host embed window's size onto the child so editors follow a host-driven resize even when the DAW resizes the parent directly instead of calling the plugin resize API (Bitwig) — see [Linux embed-parent resize](#linux-embed-parent-resize).
 - **Unused-key forwarding to the host** on macOS/Windows/X11 - a key the handler returns `EventStatus::Ignored` for is passed back to the host window, so DAW shortcuts (transport, etc.) keep working while a plug-in editor is focused. See [Keyboard forwarding to the host](#keyboard-forwarding-to-the-host).
+- **Key auto-repeat reported as a repeat** on X11 - a held key reads as one press with `repeat` set on each tick, as on macOS and Windows, instead of a release and a fresh press. See [X11 key auto-repeat](#x11-key-auto-repeat).
 
 > **Note:** This package is a temporary fork intended to live only until these patches are merged upstream into [RustAudio/baseview](https://github.com/RustAudio/baseview). Once upstream carries the fixes, switch back to the canonical crate — there is nothing here that should outlive that merge.
 
@@ -171,6 +172,14 @@ This fork forwards `Ignored` keyboard events to the host on all three platforms,
 - **X11** (`src/x11/event_loop.rs`): an unused key is re-sent to the embed parent with `send_event`. Synthetic events (the `SendEvent` bit) are skipped, so a host that re-delivers keys to the embedded window cannot ping-pong.
 
 The forward decision is the handler's returned `EventStatus`, so a `WindowHandler` must return `Captured` for keys it consumes (a focused text field, an editor shortcut) or the host will also act on them. Standalone top-level windows own their window and forward nothing.
+
+## X11 key auto-repeat
+
+X11 has no repeat flag. Unless a client turns on detectable auto-repeat, a held key repeats as a `KeyRelease` immediately followed by a `KeyPress` of the same key with the same timestamp, and upstream baseview passes the pair on as a `KeyState::Up` and a `KeyState::Down` with `repeat: false`. A handler can't tell that from a real release and press, so a held key reads as released and pressed again at the repeat rate: truce's standalone QWERTY keyboard retriggered a held note about 25 times a second ([truce#255](https://github.com/truce-audio/truce/issues/255)). macOS (`isARepeat`) and Windows (bit 30 of `lParam`) already report a held key as repeated `Down`s with `repeat: true` and no `Up` in between.
+
+The fix, in `src/x11/`: the event loop looks one event ahead while draining the queue. A `KeyRelease` followed by a `KeyPress` of the same key, window and timestamp is one repeat tick, so the release is dropped and the press delivered with `repeat: true`. A real release and re-press can't share a timestamp, so they pass through unchanged. It is the check GLFW, SDL and winit use. It needs no X extension, unlike `XkbSetDetectableAutoRepeat`. It adds no delay, unlike holding releases back for a timeout. If the server's release is read before its press has arrived, that one tick still reads as a release and press, as before; X sends the two together, so this is rare.
+
+An `Ignored` repeat press is forwarded to the embed parent like any other key, without the dropped release, which matches what a host sees under detectable auto-repeat.
 
 ## Versioning and releases
 
